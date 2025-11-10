@@ -1,0 +1,86 @@
+Technical:
+  nameplate_mw: 150
+  cf_p50: 0.40
+  project_life_years: 20
+  hours_per_year: 8760
+  yearly_degradation: 0.006
+
+Financial:
+  total_capex: 155000000
+  contingency_pct: 0.03
+  discount_rate: 0.07
+  tax_rate: 0.30
+  decommissioning_pct: 0.003
+  sscl_rate: 0.025  # ← Added here
+
+Scenario_Assumptions:
+  fx_depreciation_annual_pct: 0.03
+  lkr_opex_escalation_pct: 0.05
+  usd_opex_escalation_pct: 0.02
+  base_case_aep_gwh: 600
+  p75_aep_gwh: 570
+  p90_aep_gwh: 540
+
+FX_OPEX:
+  opex_usd_per_mwh: null
+  opex_components:
+    o&m_services: 3.5
+    insurance: 1.0
+    land_lease: 0.05
+    grid_charges: 0.5
+    admin_gna: 0.1
+  opex_total_usd_m: null
+  opex_currency_mix:
+    lkr_pct: 70
+    usd_pct: 30
+  debt_currency_mix:
+    usd_pct: 55
+    lkr_pct: 45
+
+Sensitivity_Parameters:
+  capex_increase_pct: 0.15
+  opex_increase_pct: 0.15
+  fx_stress_pct: 0.2
+  generation_variance_pct: 0.1
+  min_dscr_threshold: 1.25
+  tariff_delay_days: 180
+
+Debt_Structure:
+  debt_ratio: 0.80
+  grace_years: 1
+  debt_tenor_years: 16
+  tenor_years: 16         # ← Added as fallback alias
+  usd_dfi_pct: 0.10      # ← Added here
+  usd_debt_ratio: 0.55
+  lkr_debt_ratio: 0.45
+  usd_dfi_rate: 0.065
+  usd_mkt_rate: 0.07
+  lkr_rate: 0.08
+  principal_pct_1_4: 0.80
+  principal_pct_5_on: 0.20
+
+Tariff_Revenue:
+  tariff_lkr_kwh: 20.36
+  tariff_usd_per_kwh: 0.06787
+  fx_initial: 338         # FX at COD (not today's rate)
+  fx_rate_today: 300      # Optional, for tracking assumptions
+  fx_depr: 0.03
+
+OPEX:
+  opex_usd_mwh: null
+  opex_esc_lkr: 0.05
+  opex_esc_usd: 0.02
+  opex_split_lkr: 0.7
+  opex_split_usd: 0.3
+
+Return_Constraints:
+  min_dscr: null  
+  equity_irr: null
+  optimized_project_irr: null
+  optimized_equity_irr: null
+  npv_12pct: null
+
+Sensitivity_Analysis:
+  capex_increase_pct: 0.15
+  opex_increase_pct: 0.15
+  fx_stress_pct: 0.15

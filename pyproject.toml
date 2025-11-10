@@ -1,0 +1,13 @@
+[project]
+name = "dutchbay-v13"
+version = "0.1.0"
+description = "Dutch Bay Wind Farm model, V13 modular rebuild (generated)"
+requires-python = ">=3.10"
+dependencies = ["numpy","pandas","scipy","pyyaml","pydantic"]
+[project.optional-dependencies]
+web = ["fastapi>=0.110","uvicorn>=0.23"]
+pdf = ["reportlab>=3.6","weasyprint>=60.0"]
+dev = ["pytest","pytest-cov","flake8","black","mypy","isort"]
+[build-system]
+requires = ["setuptools","wheel"]
+build-backend = "setuptools.build_meta"

@@ -1,0 +1,17 @@
+{
+  "ast_ok": false,
+  "problems": [
+    {
+      "file": "dutchbay_v13/cli.py",
+      "error": "  File \"/mnt/data/work_smoke_make/dutchbay_v13/cli.py\", line 55\n    elif a.mode == \"api\":\n    ^^^^\nSyntaxError: invalid syntax\n"
+    },
+    {
+      "file": "dutchbay_v13/optimization.py",
+      "error": "  File \"/mnt/data/work_smoke_make/dutchbay_v13/optimization.py\", line 166\n    from __future__ import annotations\n    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nSyntaxError: from __future__ imports must occur at the beginning of the file\n"
+    },
+    {
+      "file": "dutchbay_v13/scenario_runner.py",
+      "error": "Sorry: IndentationError: expected an indented block after function definition on line 75 (scenario_runner.py, line 77)"
+    }
+  ]
+}

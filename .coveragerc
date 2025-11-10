@@ -1,0 +1,4 @@
+[run]
+omit =
+    dutchbay_v13/api.py
+    dutchbay_v13/report_pdf.py
