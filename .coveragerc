@@ -1,4 +1,5 @@
 [run]
-omit =
-    dutchbay_v13/api.py
-    dutchbay_v13/report_pdf.py
+branch = True
+source = dutchbay_v13
+[report]
+fail_under = 20

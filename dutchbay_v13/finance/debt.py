@@ -65,3 +65,16 @@ def amortization_schedule(
         )
         opening = closing
     return schedule
+
+
+# --- Shim added for core.py import compatibility ---
+def create_default_debt_structure(params: dict | None = None) -> dict:
+    """Return a minimal default debt structure dict.
+    Keeps compatibility with core.py without changing logic tested elsewhere.
+    """
+    p = (params or {}).get("debt", {}) if isinstance(params, dict) else {}
+    return {
+        "debt_ratio": p.get("debt_ratio", 0.70),
+        "tenor_years": p.get("tenor_years", 12),
+        "grace_years": p.get("grace_years", 1),
+    }

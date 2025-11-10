@@ -7,6 +7,8 @@ from .finance.cashflow import build as build_financials
 
 
 def _coerce_params(d: Dict[str, Any]) -> Params:
+    d = dict(d or {})
+    d.pop("debt", None)
     return Params(**{**Params().__dict__, **d})
 
 

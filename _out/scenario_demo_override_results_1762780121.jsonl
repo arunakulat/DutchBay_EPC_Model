@@ -1,0 +1,2 @@
+{"name": "demo_override", "mode": "irr", "tariff_usd_per_kwh": 0.12, "equity_irr": 0.1991, "project_irr": 0.1991, "npv": 0.0}
+{"name": "demo_override_low", "mode": "irr", "tariff_usd_per_kwh": 0.08, "equity_irr": 0.1991, "project_irr": 0.1991, "npv": 0.0}
