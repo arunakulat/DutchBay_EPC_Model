@@ -2,6 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+
 @dataclass(frozen=True)
 class Params:
     total_capex: float = 155.0
@@ -22,6 +23,7 @@ class Params:
     tax_rate: float = 0.30
     discount_rate: float = 0.12
 
+
 @dataclass(frozen=True)
 class DebtTerms:
     debt_ratio: float = 0.80
@@ -34,6 +36,7 @@ class DebtTerms:
     grace_years: int = 1
     principal_pct_1_4: float = 0.80
     principal_pct_5_on: float = 0.20
+
 
 @dataclass(frozen=True)
 class AnnualRow:

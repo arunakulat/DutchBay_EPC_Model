@@ -4,11 +4,13 @@ from typing import Optional
 import base64
 import pandas as pd
 
+
 def _img_to_base64(path: Path) -> Optional[str]:
     if not path.exists():
         return None
     b = path.read_bytes()
     return "data:image/png;base64," + base64.b64encode(b).decode("ascii")
+
 
 def build_html_report(outdir: str | Path = "outputs") -> Path:
     outdir = Path(outdir)

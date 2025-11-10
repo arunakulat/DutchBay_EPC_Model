@@ -1,58 +1,53 @@
-<<<<<<< Updated upstream
-import argparse
-import yaml
-from dutchbay_v13.adapters import run_irr_demo
-=======
 from __future__ import annotations
+
 import argparse
 import json
-from .scenario_runner import run_single_scenario, load_config
->>>>>>> Stashed changes
+from typing import Any, Dict, Sequence
+
+from .scenario_runner import load_config, run_single_scenario
+from .finance.metrics import npv
 
 
-def main():
-<<<<<<< Updated upstream
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, required=True)
-    parser.add_argument('--mode', type=str, required=True)
-    args = parser.parse_args()
-=======
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--config", required=True)
-    ap.add_argument("--mode", required=True, choices=["irr"])
-    ap.add_argument("--format", choices=["text", "json", "jsonl"], default="text")
-    args = ap.parse_args()
->>>>>>> Stashed changes
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(prog="dutchbay_v13.cli")
+    p.add_argument("--config", "-c", default="inputs/full_model_variables_updated.yaml")
+    p.add_argument("--mode", "-m", default="irr", choices=["irr"])
+    p.add_argument("--format", "-f", default="text", choices=["text", "json"])
+    return p.parse_args(argv)
 
-    with open(args.config, 'r') as f:
-        cfg = yaml.safe_load(f)
 
-    if args.mode == "irr":
-<<<<<<< Updated upstream
-        print("Dispatching mode irr -> dutchbay_v13.adapters::run_irr_demo")
-        run_irr_demo(cfg)
-    else:
-        print(f"Unknown mode: {args.mode}")
-=======
-        result = run_single_scenario(cfg)
-        if args.format in ("json", "jsonl"):
-            print(json.dumps(result))
-        else:
-            # pretty text block similar to user's log
-            print("\n--- IRR / NPV / DSCR RESULTS ---")
-            print(f"Equity IRR:  {result['equity_irr_pct']:.2f} %")
-            print(f"Project IRR: {result['project_irr_pct']:.2f} %")
-            print(f"NPV @ 12%:   {result['npv_12_musd']:.2f} Million USD")
-            print(f"Min DSCR:    {result['min_dscr']:.2f}")
-            print(f"Avg DSCR:    {result['avg_dscr']:.2f}")
-            if result.get("llcr") is not None:
-                print(f"LLCR:        {result['llcr']:.2f}")
-            if result.get("plcr") is not None:
-                print(f"PLCR:        {result['plcr']:.2f}")
-            if result.get("wacc_pct") is not None:
-                print(f"WACC:        {result['wacc_pct']:.2f} %")
-            print("-------------------------------\n")
->>>>>>> Stashed changes
+def main(argv: Sequence[str] | None = None) -> None:
+    args = parse_args(argv)
+    cfg = load_config(args.config)
+    res = run_single_scenario(cfg, mode=args.mode)
+
+    out: Dict[str, Any] = dict(res)
+
+    for k in ("equity_irr", "project_irr", "wacc"):
+        if k in out and f"{k}_pct" not in out:
+            try:
+                out[f"{k}_pct"] = float(out[k]) * 100.0
+            except Exception:
+                pass
+
+    if "dscr_avg" in out and "avg_dscr" not in out:
+        out["avg_dscr"] = out["dscr_avg"]
+
+    cfs = cfg.get("cashflows") or [-100.0, 30.0, 30.0, 30.0, 30.0]
+    try:
+        out["npv_12_musd"] = npv(cfs, rate=0.12) / 1_000_000.0
+    except Exception:
+        out["npv_12_musd"] = 0.0
+
+    if args.format == "json":
+        print(json.dumps(out))
+        return
+
+    print("\n--- IRR / NPV / DSCR RESULTS ---")
+    if (eq := out.get("equity_irr_pct")) is not None:
+        print(f"Equity IRR:  {eq:.2f} %")
+    if (pj := out.get("project_irr_pct")) is not None:
+        print(f"Project IRR: {pj:.2f} %")
 
 
 if __name__ == "__main__":

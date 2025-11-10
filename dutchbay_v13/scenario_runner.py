@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Tuple
-import os, json, csv
+import json
+import csv
 from pathlib import Path
 
 try:
     import yaml  # type: ignore
-except Exception as e:  # pragma: no cover
+except Exception:  # pragma: no cover
     yaml = None
 
 try:
@@ -15,7 +16,10 @@ except Exception:  # pragma: no cover
     SCHEMA = {}
     DEBT_SCHEMA = {}
 
-def _validate_params_dict(params: Dict[str, Any], where: str = "params") -> Dict[str, Any]:
+
+def _validate_params_dict(
+    params: Dict[str, Any], where: str = "params"
+) -> Dict[str, Any]:
     out: Dict[str, Any] = dict(params or {})
     if not SCHEMA:
         return out
@@ -33,6 +37,7 @@ def _validate_params_dict(params: Dict[str, Any], where: str = "params") -> Dict
             if not (float(mn) <= fv <= float(mx)):
                 raise ValueError(f"{where}: {k} out of range [{mn}, {mx}] got {fv}")
     return out
+
 
 def _validate_debt_dict(debt: Dict[str, Any], where: str = "debt") -> Dict[str, Any]:
     out: Dict[str, Any] = dict(debt or {})
@@ -53,6 +58,7 @@ def _validate_debt_dict(debt: Dict[str, Any], where: str = "debt") -> Dict[str, 
                 raise ValueError(f"{where}: {k} out of range [{mn}, {mx}] got {fv}")
     return out
 
+
 def _iter_yaml_files(paths: Iterable[str]) -> List[Path]:
     out: List[Path] = []
     for p in paths:
@@ -71,11 +77,13 @@ def _iter_yaml_files(paths: Iterable[str]) -> List[Path]:
             seen.add(f)
     return uniq
 
+
 def _load_yaml(path: Path) -> Dict[str, Any]:
     if yaml is None:
         raise RuntimeError("PyYAML is required to load scenarios")
     with path.open("r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
+
 
 def _run_model(params: Dict[str, Any]) -> Dict[str, Any]:
     """Run the financial model; if implementation is missing, return safe placeholders."""
@@ -85,11 +93,16 @@ def _run_model(params: Dict[str, Any]) -> Dict[str, Any]:
     try:
         # Preferred API
         from .core import build_financial_model  # type: ignore
+
         result = build_financial_model(params)
         if isinstance(result, dict):
             return result
         # gracefully coerce tuple returns if your API returns (df, proj_cf, eq_cf, cap, metrics)
-        if isinstance(result, tuple) and len(result) >= 1 and isinstance(result[-1], dict):
+        if (
+            isinstance(result, tuple)
+            and len(result) >= 1
+            and isinstance(result[-1], dict)
+        ):
             return result[-1]
     except Exception:
         pass
@@ -102,7 +115,14 @@ def _run_model(params: Dict[str, Any]) -> Dict[str, Any]:
         "plcr": None,
     }
 
-def run_scenario_matrix(config_paths: Iterable[str], outputs_dir: str, *, fmt: str = "csv", save_annual: bool = False) -> Tuple[int, int]:
+
+def run_scenario_matrix(
+    config_paths: Iterable[str],
+    outputs_dir: str,
+    *,
+    fmt: str = "csv",
+    save_annual: bool = False,
+) -> Tuple[int, int]:
     """Read YAMLs, validate ranges, run model, and write JSONL/CSV outputs.
     Returns (num_scenarios, num_written).
     """
@@ -116,7 +136,9 @@ def run_scenario_matrix(config_paths: Iterable[str], outputs_dir: str, *, fmt: s
         data = _load_yaml(f)
         # Split top-level into params/debt/expected
         debt = _validate_debt_dict(data.get("debt") or {}, where=f"{f.name}:debt")
-        params = {k: v for k, v in data.items() if k not in {"debt", "expected_metrics"}}
+        params = {
+            k: v for k, v in data.items() if k not in {"debt", "expected_metrics"}
+        }
         params = _validate_params_dict(params, where=f"{f.name}:params")
         merged = dict(params)
         if debt:
@@ -125,7 +147,11 @@ def run_scenario_matrix(config_paths: Iterable[str], outputs_dir: str, *, fmt: s
         rec = {
             "scenario": f.stem,
             **{k: merged.get(k) for k in sorted(merged.keys())},
-            **{k: metrics.get(k) for k in ["project_irr", "equity_irr", "min_dscr", "llcr", "plcr"] if k in metrics},
+            **{
+                k: metrics.get(k)
+                for k in ["project_irr", "equity_irr", "min_dscr", "llcr", "plcr"]
+                if k in metrics
+            },
         }
         rows.append(rec)
 

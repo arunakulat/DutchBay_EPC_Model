@@ -1,12 +1,12 @@
 from __future__ import annotations
-from dataclasses import dataclass
-from typing import List, Optional
 
 from dutchbay_v13.types import AnnualRow, Params, DebtTerms
 from dutchbay_v13.finance.debt import amortization_schedule
 
 
-def build(p: Params, d: DebtTerms) -> tuple[list[AnnualRow], float, float, float, float, float]:
+def build(
+    p: Params, d: DebtTerms
+) -> tuple[list[AnnualRow], float, float, float, float, float]:
     years = list(range(1, p.project_life_years + 1))
     total_debt = p.total_capex * d.debt_ratio
     schedule = amortization_schedule(total_debt, d, p.project_life_years)
@@ -70,7 +70,12 @@ def build(p: Params, d: DebtTerms) -> tuple[list[AnnualRow], float, float, float
 
 
 def _production(p: Params, year: int) -> float:
-    return p.cf_p50 * p.nameplate_mw * p.hours_per_year * ((1.0 - p.yearly_degradation) ** (year - 1))
+    return (
+        p.cf_p50
+        * p.nameplate_mw
+        * p.hours_per_year
+        * ((1.0 - p.yearly_degradation) ** (year - 1))
+    )
 
 
 def _revenue_lkr(p: Params, prod_mwh: float) -> float:
@@ -80,8 +85,12 @@ def _revenue_lkr(p: Params, prod_mwh: float) -> float:
 def _opex_usd(p: Params, year: int, prod_mwh: float, fx: float) -> float:
     if p.opex_usd_mwh is None:
         raise ValueError("opex_usd_mwh must be set or computed before cashflow calc")
-    usd_comp = p.opex_usd_mwh * p.opex_split_usd * ((1.0 + p.opex_esc_usd) ** (year - 1))
-    lkr_comp = p.opex_usd_mwh * p.opex_split_lkr * ((1.0 + p.opex_esc_lkr) ** (year - 1)) / fx
+    usd_comp = (
+        p.opex_usd_mwh * p.opex_split_usd * ((1.0 + p.opex_esc_usd) ** (year - 1))
+    )
+    lkr_comp = (
+        p.opex_usd_mwh * p.opex_split_lkr * ((1.0 + p.opex_esc_lkr) ** (year - 1)) / fx
+    )
     return usd_comp + lkr_comp
 
 

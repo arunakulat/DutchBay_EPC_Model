@@ -8,12 +8,15 @@ from dutchbay_v13.types import Params, DebtTerms
 logger = logging.getLogger()
 logging.basicConfig(level=logging.INFO)
 
+
 def run_irr_demo(cfg: dict):
     try:
         logger.info("✅ YAML loaded with %d top-level blocks", len(cfg))
         logger.info(">>> Flattening grouped config dict")
         flat_cfg = {
-            k: v for group in cfg.values() if isinstance(group, dict)
+            k: v
+            for group in cfg.values()
+            if isinstance(group, dict)
             for k, v in group.items()
         }
 
@@ -56,5 +59,6 @@ def run_irr_demo(cfg: dict):
 
     except Exception:
         import traceback
+
         logger.error("🚨 run_irr_demo crashed:")
         traceback.print_exc()

@@ -5,15 +5,22 @@ import pandas as pd
 from .types import Params, DebtTerms
 from .finance.cashflow import build as build_financials
 
+
 def _coerce_params(d: Dict[str, Any]) -> Params:
     return Params(**{**Params().__dict__, **d})
+
 
 def _default_debt() -> DebtTerms:
     return DebtTerms()
 
+
 def build_financial_model(params: Dict[str, Any]) -> Dict[str, Any]:
     p = _coerce_params(params)
-    debt = _coerce_debt(params.get('debt')) if isinstance(params, dict) and 'debt' in params else _default_debt()
+    debt = (
+        _coerce_debt(params.get("debt"))
+        if isinstance(params, dict) and "debt" in params
+        else _default_debt()
+    )
     rows, eq_irr, prj_irr, npv_12, min_dscr, avg_dscr = build_financials(p, debt)
     df = pd.DataFrame([asdict(r) for r in rows])
     out: Dict[str, Any] = {
@@ -26,6 +33,7 @@ def build_financial_model(params: Dict[str, Any]) -> Dict[str, Any]:
         "annual_data": df,
     }
     return out
+
 
 def _coerce_debt(d: dict | None) -> DebtTerms:
     base = DebtTerms().__dict__.copy()

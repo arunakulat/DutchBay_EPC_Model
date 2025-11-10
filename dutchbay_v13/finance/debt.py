@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import List
 from ..types import DebtTerms
 
+
 @dataclass
 class DebtYear:
     year: int
@@ -12,13 +13,20 @@ class DebtYear:
     closing: float
     debt_service: float
 
+
 def blended_rate(debt: DebtTerms) -> float:
     usd = debt.usd_debt_ratio
     lkr = 1.0 - usd
-    usd_rate = debt.usd_dfi_pct * debt.usd_dfi_rate + (1.0 - debt.usd_dfi_pct) * debt.usd_mkt_rate
+    usd_rate = (
+        debt.usd_dfi_pct * debt.usd_dfi_rate
+        + (1.0 - debt.usd_dfi_pct) * debt.usd_mkt_rate
+    )
     return usd * usd_rate + lkr * debt.lkr_rate
 
-def amortization_schedule(total_debt: float, debt: DebtTerms, project_years: int) -> List[DebtYear]:
+
+def amortization_schedule(
+    total_debt: float, debt: DebtTerms, project_years: int
+) -> List[DebtYear]:
     r = blended_rate(debt)
     years = project_years
     schedule: List[DebtYear] = []
@@ -45,9 +53,15 @@ def amortization_schedule(total_debt: float, debt: DebtTerms, project_years: int
             else:
                 principal = min(p2, opening)
         closing = max(0.0, opening - principal)
-        schedule.append(DebtYear(
-            year=y, opening=opening, interest=interest, principal=principal,
-            closing=closing, debt_service=interest + principal
-        ))
+        schedule.append(
+            DebtYear(
+                year=y,
+                opening=opening,
+                interest=interest,
+                principal=principal,
+                closing=closing,
+                debt_service=interest + principal,
+            )
+        )
         opening = closing
     return schedule

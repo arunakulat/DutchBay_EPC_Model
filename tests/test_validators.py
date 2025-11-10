@@ -1,6 +1,6 @@
-import types
 import pytest
 from dutchbay_v13 import scenario_runner as sr
+
 
 def test_validate_params_with_schema(monkeypatch):
     schema = {"tariff_usd_per_kwh": {"min": 0.0, "max": 1.0}}
@@ -9,6 +9,7 @@ def test_validate_params_with_schema(monkeypatch):
     assert ok["tariff_usd_per_kwh"] == 0.5
     with pytest.raises(ValueError):
         sr._validate_params_dict({"tariff_usd_per_kwh": 2.0}, where="test")
+
 
 def test_validate_debt_with_schema(monkeypatch):
     ds = {"debt_ratio": {"min": 0.0, "max": 1.0}}

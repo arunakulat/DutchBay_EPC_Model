@@ -1,6 +1,5 @@
-import os
-from pathlib import Path
 from dutchbay_v13 import cli
+
 
 def test_modes_smoke(tmp_path):
     # minimal config yaml
@@ -9,8 +8,18 @@ def test_modes_smoke(tmp_path):
     out = tmp_path / "out"
 
     # Modes to exercise (excluding 'api')
-    modes = ["baseline", "sensitivity", "optimize", "report",
-             "montecarlo", "validate", "irr", "utils", "debt", "cashflow"]
+    modes = [
+        "baseline",
+        "sensitivity",
+        "optimize",
+        "report",
+        "montecarlo",
+        "validate",
+        "irr",
+        "utils",
+        "debt",
+        "cashflow",
+    ]
 
     for m in modes:
         rc = cli.main(["--mode", m, "--config", str(cfg), "--outputs-dir", str(out)])

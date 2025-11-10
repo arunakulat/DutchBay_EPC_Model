@@ -1,41 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "dutchbay-v13"
-<<<<<<< Updated upstream
-version = "0.1.0"
-description = "Dutch Bay Wind Farm model, V13 modular rebuild (generated)"
-requires-python = ">=3.10"
-dependencies = ["numpy","pandas","scipy","pyyaml","pydantic"]
-[project.optional-dependencies]
-web = ["fastapi>=0.110","uvicorn>=0.23"]
-pdf = ["reportlab>=3.6","weasyprint>=60.0"]
-dev = ["pytest","pytest-cov","flake8","black","mypy","isort"]
-[build-system]
-requires = ["setuptools","wheel"]
-build-backend = "setuptools.build_meta"
-=======
 version = "13.1.0"
-description = "DutchBay model v13"
-requires-python = ">=3.11"
+description = "Dutch Bay EPC Model"
+readme = "README.md"
+requires-python = ">=3.10"
 dependencies = [
-  "PyYAML>=6",
-  "numpy>=1.26",
+  "numpy>=1.24",
+  "pandas>=2.0",
+  "numpy-financial>=1.0.0",
 ]
+
 [project.optional-dependencies]
-dev  = ["black", "ruff", "flake8", "mypy", "bandit"]
-test = ["pytest", "coverage"]
-
-[project.scripts]
-dutchbay = "dutchbay_v13.cli:main"
-
-[tool.setuptools]
-include-package-data = true
+dev = [
+  "ruff>=0.5",
+  "black>=24.0",
+  "bandit>=1.7",
+  "pytest>=7.0",
+  "pytest-cov>=4.0",
+]
+test = [
+  "pytest>=7.0",
+  "pytest-cov>=4.0",
+]
 
 [tool.setuptools.packages.find]
 include = ["dutchbay_v13*"]
-
-[tool.setuptools.package-data]
-dutchbay_v13 = [
-  "inputs/**/*.yaml", "inputs/**/*.yml",
-  "inputs/**/*.json", "inputs/**/*.csv", "inputs/**/*.jsonl"
-]
->>>>>>> Stashed changes
