@@ -1,0 +1,193 @@
+== VENV ==
+Python 3.11.14
+/Users/aruna/Desktop/DutchBay_EPC_Model/.venv311/bin/python
+/Users/aruna/Desktop/DutchBay_EPC_Model/.venv311/bin/pip
+== Patch: loader + RNG ==
+✓ Patched: scenario_runner.load_config + monte_carlo RNG/imports
+== Ensure tests' config path ==
+-rw-r--r--  1 aruna  staff  572 10 Nov 11:47 inputs/full_model_variables_updated.yaml
+== Reinstall (editable) ==
+Requirement already satisfied: pip in ./.venv311/lib/python3.11/site-packages (25.3)
+Requirement already satisfied: wheel in ./.venv311/lib/python3.11/site-packages (0.45.1)
+Requirement already satisfied: setuptools in ./.venv311/lib/python3.11/site-packages (80.9.0)
+Obtaining file:///Users/aruna/Desktop/DutchBay_EPC_Model
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Checking if build backend supports build_editable: started
+  Checking if build backend supports build_editable: finished with status 'done'
+  Getting requirements to build editable: started
+  Getting requirements to build editable: finished with status 'done'
+  Preparing editable metadata (pyproject.toml): started
+  Preparing editable metadata (pyproject.toml): finished with status 'done'
+Requirement already satisfied: PyYAML>=6 in ./.venv311/lib/python3.11/site-packages (from dutchbay-v13==13.1.0) (6.0.3)
+Requirement already satisfied: numpy>=1.26 in ./.venv311/lib/python3.11/site-packages (from dutchbay-v13==13.1.0) (2.3.4)
+Requirement already satisfied: black in ./.venv311/lib/python3.11/site-packages (from dutchbay-v13==13.1.0) (25.11.0)
+Requirement already satisfied: ruff in ./.venv311/lib/python3.11/site-packages (from dutchbay-v13==13.1.0) (0.14.4)
+Requirement already satisfied: flake8 in ./.venv311/lib/python3.11/site-packages (from dutchbay-v13==13.1.0) (7.3.0)
+Requirement already satisfied: mypy in ./.venv311/lib/python3.11/site-packages (from dutchbay-v13==13.1.0) (1.18.2)
+Requirement already satisfied: bandit in ./.venv311/lib/python3.11/site-packages (from dutchbay-v13==13.1.0) (1.8.6)
+Requirement already satisfied: pytest in ./.venv311/lib/python3.11/site-packages (from dutchbay-v13==13.1.0) (9.0.0)
+Requirement already satisfied: coverage in ./.venv311/lib/python3.11/site-packages (from dutchbay-v13==13.1.0) (7.11.3)
+Requirement already satisfied: stevedore>=1.20.0 in ./.venv311/lib/python3.11/site-packages (from bandit->dutchbay-v13==13.1.0) (5.5.0)
+Requirement already satisfied: rich in ./.venv311/lib/python3.11/site-packages (from bandit->dutchbay-v13==13.1.0) (14.2.0)
+Requirement already satisfied: click>=8.0.0 in ./.venv311/lib/python3.11/site-packages (from black->dutchbay-v13==13.1.0) (8.3.0)
+Requirement already satisfied: mypy-extensions>=0.4.3 in ./.venv311/lib/python3.11/site-packages (from black->dutchbay-v13==13.1.0) (1.1.0)
+Requirement already satisfied: packaging>=22.0 in ./.venv311/lib/python3.11/site-packages (from black->dutchbay-v13==13.1.0) (25.0)
+Requirement already satisfied: pathspec>=0.9.0 in ./.venv311/lib/python3.11/site-packages (from black->dutchbay-v13==13.1.0) (0.12.1)
+Requirement already satisfied: platformdirs>=2 in ./.venv311/lib/python3.11/site-packages (from black->dutchbay-v13==13.1.0) (4.5.0)
+Requirement already satisfied: pytokens>=0.3.0 in ./.venv311/lib/python3.11/site-packages (from black->dutchbay-v13==13.1.0) (0.3.0)
+Requirement already satisfied: mccabe<0.8.0,>=0.7.0 in ./.venv311/lib/python3.11/site-packages (from flake8->dutchbay-v13==13.1.0) (0.7.0)
+Requirement already satisfied: pycodestyle<2.15.0,>=2.14.0 in ./.venv311/lib/python3.11/site-packages (from flake8->dutchbay-v13==13.1.0) (2.14.0)
+Requirement already satisfied: pyflakes<3.5.0,>=3.4.0 in ./.venv311/lib/python3.11/site-packages (from flake8->dutchbay-v13==13.1.0) (3.4.0)
+Requirement already satisfied: typing_extensions>=4.6.0 in ./.venv311/lib/python3.11/site-packages (from mypy->dutchbay-v13==13.1.0) (4.15.0)
+Requirement already satisfied: iniconfig>=1.0.1 in ./.venv311/lib/python3.11/site-packages (from pytest->dutchbay-v13==13.1.0) (2.3.0)
+Requirement already satisfied: pluggy<2,>=1.5 in ./.venv311/lib/python3.11/site-packages (from pytest->dutchbay-v13==13.1.0) (1.6.0)
+Requirement already satisfied: pygments>=2.7.2 in ./.venv311/lib/python3.11/site-packages (from pytest->dutchbay-v13==13.1.0) (2.19.2)
+Requirement already satisfied: markdown-it-py>=2.2.0 in ./.venv311/lib/python3.11/site-packages (from rich->bandit->dutchbay-v13==13.1.0) (4.0.0)
+Requirement already satisfied: mdurl~=0.1 in ./.venv311/lib/python3.11/site-packages (from markdown-it-py>=2.2.0->rich->bandit->dutchbay-v13==13.1.0) (0.1.2)
+Building wheels for collected packages: dutchbay-v13
+  Building editable for dutchbay-v13 (pyproject.toml): started
+  Building editable for dutchbay-v13 (pyproject.toml): finished with status 'done'
+  Created wheel for dutchbay-v13: filename=dutchbay_v13-13.1.0-0.editable-py3-none-any.whl size=3150 sha256=c281e3e7f999ca9e60b1446f88bb0d0ef7d3003a84ca005012e37daf1b91f5c0
+  Stored in directory: /private/var/folders/s7/bjx1cll14tl2dnwsg35cnw9w0000gn/T/pip-ephem-wheel-cache-g1tci06v/wheels/6d/48/3d/9ac97011973f200db6ee3a0ffdc9b857c55167295eefb9b3dd
+Successfully built dutchbay-v13
+Installing collected packages: dutchbay-v13
+  Attempting uninstall: dutchbay-v13
+    Found existing installation: dutchbay-v13 13.1.0
+    Uninstalling dutchbay-v13-13.1.0:
+      Successfully uninstalled dutchbay-v13-13.1.0
+Successfully installed dutchbay-v13-13.1.0
+== Lint/format/security ==
+E402 Module level import not at top of file
+ --> dutchbay_v13/monte_carlo.py:5:1
+  |
+4 | rng = random.Random()  # nosec B311
+5 | from .scenario_runner import run_single_scenario, load_config
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+6 |
+7 | def run_monte_carlo(base_cfg_path: str, n: int = 300) -> dict:
+  |
+
+invalid-syntax: Expected one or more symbol names after import
+ --> dutchbay_v13/scenario_runner.py:6:31
+  |
+4 | import yaml
+5 |
+6 | from .finance.metrics import (
+  |                               ^
+7 |
+8 | def load_config(path: str) -> dict:
+  |
+
+invalid-syntax: Expected a statement
+  --> dutchbay_v13/scenario_runner.py:58:1
+   |
+56 |     wacc_from_terms,
+57 |     llcr_plcr,
+58 | )
+   | ^
+59 |
+60 | @dataclass
+   |
+
+invalid-syntax: Expected a statement
+  --> dutchbay_v13/scenario_runner.py:58:2
+   |
+56 |     wacc_from_terms,
+57 |     llcr_plcr,
+58 | )
+   |  ^
+59 |
+60 | @dataclass
+   |
+
+invalid-syntax: Expected an indented block after function definition
+  --> dutchbay_v13/scenario_runner.py:72:1
+   |
+71 | def load_config(path: str) -> Dict:
+72 | def load_config(path: str) -> Dict:
+   | ^^^
+73 |     import os
+74 |     import importlib.resources as ir
+   |
+
+Found 5 errors.
+Run started:2025-11-10 06:45:32.548959
+
+Test results:
+	No issues identified.
+
+Code scanned:
+	Total lines of code: 420
+	Total lines skipped (#nosec): 0
+	Total potential issues skipped due to specifically being disabled (e.g., #nosec BXXX): 1
+
+Run metrics:
+	Total issues (by severity):
+		Undefined: 0
+		Low: 0
+		Medium: 0
+		High: 0
+	Total issues (by confidence):
+		Undefined: 0
+		Low: 0
+		Medium: 0
+		High: 0
+Files skipped (1):
+	dutchbay_v13/scenario_runner.py (syntax error while parsing AST from file)
+== Pytest ==
+
+==================================== ERRORS ====================================
+___________________ ERROR collecting tests/test_scenario.py ____________________
+.venv311/lib/python3.11/site-packages/_pytest/python.py:507: in importtestmodule
+    mod = import_path(
+.venv311/lib/python3.11/site-packages/_pytest/pathlib.py:589: in import_path
+    importlib.import_module(module_name)
+/opt/homebrew/Cellar/python@3.11/3.11.14_1/Frameworks/Python.framework/Versions/3.11/lib/python3.11/importlib/__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+<frozen importlib._bootstrap>:1204: in _gcd_import
+    ???
+<frozen importlib._bootstrap>:1176: in _find_and_load
+    ???
+<frozen importlib._bootstrap>:1147: in _find_and_load_unlocked
+    ???
+<frozen importlib._bootstrap>:690: in _load_unlocked
+    ???
+.venv311/lib/python3.11/site-packages/_pytest/assertion/rewrite.py:197: in exec_module
+    exec(co, module.__dict__)
+tests/test_scenario.py:1: in <module>
+    from dutchbay_v13.scenario_runner import load_config, run_single_scenario
+E     File "/Users/aruna/Desktop/DutchBay_EPC_Model/dutchbay_v13/scenario_runner.py", line 8
+E       def load_config(path: str) -> dict:
+E       ^^^
+E   SyntaxError: invalid syntax
+_______________ ERROR collecting tests/test_scenario_unittest.py _______________
+.venv311/lib/python3.11/site-packages/_pytest/python.py:507: in importtestmodule
+    mod = import_path(
+.venv311/lib/python3.11/site-packages/_pytest/pathlib.py:589: in import_path
+    importlib.import_module(module_name)
+/opt/homebrew/Cellar/python@3.11/3.11.14_1/Frameworks/Python.framework/Versions/3.11/lib/python3.11/importlib/__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+<frozen importlib._bootstrap>:1204: in _gcd_import
+    ???
+<frozen importlib._bootstrap>:1176: in _find_and_load
+    ???
+<frozen importlib._bootstrap>:1147: in _find_and_load_unlocked
+    ???
+<frozen importlib._bootstrap>:690: in _load_unlocked
+    ???
+.venv311/lib/python3.11/site-packages/_pytest/assertion/rewrite.py:197: in exec_module
+    exec(co, module.__dict__)
+tests/test_scenario_unittest.py:3: in <module>
+    from dutchbay_v13.scenario_runner import load_config, run_single_scenario
+E     File "/Users/aruna/Desktop/DutchBay_EPC_Model/dutchbay_v13/scenario_runner.py", line 8
+E       def load_config(path: str) -> dict:
+E       ^^^
+E   SyntaxError: invalid syntax
+=========================== short test summary info ============================
+ERROR tests/test_scenario.py
+ERROR tests/test_scenario_unittest.py
+!!!!!!!!!!!!!!!!!!! Interrupted: 2 errors during collection !!!!!!!!!!!!!!!!!!!!
+2 errors in 0.12s

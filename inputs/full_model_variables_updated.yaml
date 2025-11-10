@@ -1,0 +1,35 @@
+Technical:
+  nameplate_mw: 150
+  capacity_factor: 0.40
+  degradation: 0.006
+  hours_per_year: 8760
+
+Finance:
+  project_life_years: 20
+  total_capex_usd_m: 155
+  tariff_lkr_per_kwh: 20.30
+
+  fx_initial: 300
+  fx_depr: 0.03
+  cod_year: 2029
+
+  opex_usd_per_mwh: 6.0
+
+  debt_ratio: 0.70
+  usd_debt_ratio: 0.50
+  usd_dfi_pct: 0.50
+  usd_dfi_rate: 0.065
+  usd_mkt_rate: 0.070
+  lkr_rate: 0.075
+  grace_years: 2
+  tenor_years: 12
+
+  target_equity_cost: 0.18
+
+  use_dsra: true
+  dsra_months: 9
+  use_ida_prg: false
+  ida_fee: 0.0075
+
+  corp_tax_rate: 0.30
+  tax_holiday_years: 0

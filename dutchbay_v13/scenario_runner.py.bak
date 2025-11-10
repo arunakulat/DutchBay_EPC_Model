@@ -1,0 +1,126 @@
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Dict
+import yaml
+
+from .finance.metrics import (
+
+def load_config(path: str) -> dict:
+    """Resolve YAML config from: exact path -> repo-root/inputs -> packaged fallback."""
+    import os, yaml, importlib.resources as ir
+    candidates = []
+    if path:
+        candidates.append(os.path.abspath(path))
+        candidates.append(os.path.join(os.getcwd(), "inputs", os.path.basename(path)))
+    else:
+        candidates.append(os.path.join(os.getcwd(), "inputs", "full_model_variables_updated.yaml"))
+    try:
+        pkg = ir.files("dutchbay_v13").joinpath("inputs/full_model_variables_updated.yaml")
+        candidates.append(str(pkg))
+    except Exception:
+        pass
+    tried = []
+    for c in candidates:
+        if c and os.path.exists(c):
+            with open(c, "r") as f:
+                return yaml.safe_load(f)
+        tried.append(c)
+    raise FileNotFoundError(f"Config not found. Tried: {tried}")
+
+
+def load_config(path: str) -> dict:
+    """Resolve YAML config from: exact path -> repo-root/inputs -> packaged fallback."""
+    import os, yaml, importlib.resources as ir
+    candidates = []
+    if path:
+        candidates.append(os.path.abspath(path))
+        candidates.append(os.path.join(os.getcwd(), "inputs", os.path.basename(path)))
+    else:
+        candidates.append(os.path.join(os.getcwd(), "inputs", "full_model_variables_updated.yaml"))
+    try:
+        pkg = ir.files("dutchbay_v13").joinpath("inputs/full_model_variables_updated.yaml")
+        candidates.append(str(pkg))
+    except Exception:
+        pass
+    tried = []
+    for c in candidates:
+        if c and os.path.exists(c):
+            with open(c, "r") as f:
+                return yaml.safe_load(f)
+        tried.append(c)
+    raise FileNotFoundError(f"Config not found. Tried: {tried}")
+
+    build_project_cashflows,
+    irr_bisection,
+    npv,
+    wacc_from_terms,
+    llcr_plcr,
+)
+
+@dataclass
+class ScenarioResult:
+    equity_irr_pct: float
+    project_irr_pct: float
+    npv_12_musd: float
+    min_dscr: float
+    avg_dscr: float
+    llcr: float | None
+    plcr: float | None
+    wacc_pct: float | None
+
+def load_config(path: str) -> Dict:
+def load_config(path: str) -> Dict:
+    import os
+    import importlib.resources as ir
+    import yaml
+
+    cand = os.path.abspath(path)
+    candidates = [cand]
+
+    # also try repo-root/inputs/<filename>
+    try:
+        root_inputs = os.path.join(os.path.dirname(__file__), "inputs", os.path.basename(path))
+        candidates.append(root_inputs)
+    except Exception:
+        pass
+
+    # packaged fallback
+    try:
+        pkg = ir.files("dutchbay_v13").joinpath("inputs/full_model_variables_updated.yaml")
+        candidates.append(str(pkg))
+    except Exception:
+        pass
+
+    for c in candidates:
+        if c and os.path.exists(c):
+            with open(c, "r") as f:
+                return yaml.safe_load(f)
+
+    raise FileNotFoundError(f"Config not found. Tried: {candidates}")
+
+def load_config(path: str) -> dict:
+    """
+    Resolve config by trying:
+      1) explicit path
+      2) repo-root/inputs/<basename>
+      3) packaged fallback: dutchbay_v13/inputs/full_model_variables_updated.yaml
+    """
+    import os, yaml, importlib.resources as ir
+    candidates = []
+    if path:
+        candidates.append(os.path.abspath(path))
+        candidates.append(os.path.join(os.getcwd(), "inputs", os.path.basename(path)))
+    else:
+        candidates.append(os.path.join(os.getcwd(), "inputs", "full_model_variables_updated.yaml"))
+    try:
+        pkg_fallback = ir.files("dutchbay_v13").joinpath("inputs/full_model_variables_updated.yaml")
+        candidates.append(str(pkg_fallback))
+    except Exception:
+        pass
+    tried = []
+    for c in candidates:
+        if c and os.path.exists(c):
+            with open(c, "r") as f:
+                return yaml.safe_load(f)
+        tried.append(c)
+    raise FileNotFoundError(f"Config not found. Tried: {tried}")
