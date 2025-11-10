@@ -263,3 +263,15 @@ if __name__ == "__main__":
         print("✗ Validation errors:")
         for error in errors:
             print(f"  - {error}")
+
+# --- BEGIN AUTO-SHIM ---
+def validate_params(d):
+    """Minimal parameter validator: only known tariff keys allowed."""
+    if not isinstance(d, dict):
+        raise TypeError("params must be a dict")
+    allowed = {"tariff_lkr_per_kwh", "debt", "mode", "name"}
+    for k in d:
+        if k not in allowed:
+            raise ValueError(f"Unknown parameter '{k}'")
+    return True
+# --- END AUTO-SHIM ---

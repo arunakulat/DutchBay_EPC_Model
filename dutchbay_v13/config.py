@@ -73,3 +73,25 @@ def load_model_config(
 
     flat = _flatten_grouped(cfg)
     return _split_power_and_debt(flat)
+
+# --- BEGIN AUTO-SHIM ---
+def load_config(path_or_dict):
+    """Very small loader that accepts a dict or YAML path."""
+    if isinstance(path_or_dict, dict):
+        return dict(path_or_dict)
+    try:
+        from pathlib import Path
+        import yaml  # optional; if missing, use a naive parser
+        p = Path(path_or_dict)
+        with p.open("r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+    except Exception:
+        # ultra-naive key: value loader
+        data = {}
+        with open(path_or_dict, "r", encoding="utf-8") as f:
+            for line in f:
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    data[k.strip()] = v.strip()
+        return data
+# --- END AUTO-SHIM ---
