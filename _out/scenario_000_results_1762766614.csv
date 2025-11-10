@@ -1,0 +1,2 @@
+mode,equity_irr,project_irr,wacc,dscr_min,dscr_avg,llcr,plcr,npv_12_musd,inputs_seen,equity_irr_pct,project_irr_pct,wacc_pct,avg_dscr,min_dscr,name
+irr,0.19905414965003732,0.19905414965003732,0.1,1.6,1.7,1.5,1.6,0.0,True,19.905414965003732,19.905414965003732,10.0,1.7,1.6,scenario_1

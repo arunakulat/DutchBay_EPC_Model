@@ -5,6 +5,12 @@ Optimizes debt ratio, USD/LKR split, and DFI debt under IRR/DSCR constraints
 ENHANCED VERSION: Robust error handling, constraint verification, dict key access
 """
 from __future__ import annotations
+from pathlib import Path
+from typing import List, Dict, Any
+import json
+import pandas as pd
+import yaml
+from .charts import pareto_chart
 import numpy as np
 import warnings
 from scipy.optimize import minimize, Bounds, NonlinearConstraint
@@ -14,7 +20,6 @@ from .legacy_v12 import (
     create_default_debt_structure,
     DebtStructure,
 )
-from typing import Dict, Any
 
 
 def optimize_capital_structure(
@@ -171,11 +176,6 @@ def optimize_capital_structure(
         }
 
 
-from typing import List
-import pandas as pd
-from .core import build_financial_model
-
-
 def _parse_grid(spec: str, *, is_int: bool = False) -> List[float]:
     # spec like "0.5:0.9:0.05" or "10:20:1"
     parts = [p.strip() for p in spec.split(":")]
@@ -189,9 +189,6 @@ def _parse_grid(spec: str, *, is_int: bool = False) -> List[float]:
 def _is_dominated(a_irr: float, a_dscr: float, b_irr: float, b_dscr: float) -> bool:
     # b dominates a if >= on both and > on at least one
     return (b_irr >= a_irr and b_dscr >= a_dscr) and (b_irr > a_irr or b_dscr > a_dscr)
-
-
-from .charts import pareto_chart
 
 
 def optimize_debt_pareto(
@@ -289,10 +286,6 @@ def optimize_debt_pareto(
     }
 
 
-import yaml
-from pathlib import Path as _Path
-
-
 def _normalize_grid(val, is_int: bool = False):
     if isinstance(val, str):
         return _parse_grid(val, is_int=is_int)
@@ -302,13 +295,13 @@ def _normalize_grid(val, is_int: bool = False):
 
 
 def optimize_debt_pareto_yaml(
-    grid_yaml: str | _Path, outdir: str | _Path | None = None
+    grid_yaml: str | Path, outdir: str | Path | None = None
 ) -> Dict[str, Any]:
-    data = yaml.safe_load(_Path(grid_yaml).read_text(encoding="utf-8")) or {}
+    data = yaml.safe_load(Path(grid_yaml).read_text(encoding="utf-8")) or {}
     grids = data.get("grids", [])
     results = []
     if outdir:
-        outdir = _Path(outdir)
+        outdir = Path(outdir)
         outdir.mkdir(parents=True, exist_ok=True)
     for i, g in enumerate(grids):
         name = str(g.get("name", f"grid_{i+1}"))
