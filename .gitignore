@@ -13,6 +13,12 @@ __pycache__/
 .pyre/
 .pytype/
 
+_out/
+_regression/
+.pytest_cache/
+.coverage
+htmlcov/
+
 # --- Virtual environments (name-agnostic) ---
 .venv/
 .venv*/
