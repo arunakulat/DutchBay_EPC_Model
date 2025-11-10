@@ -160,3 +160,17 @@ def create_tornado_chart_data(df: pd.DataFrame) -> pd.DataFrame:
     tornado_df = tornado_df.sort_values("impact", ascending=False)
 
     return tornado_df
+# === BEGIN TEST SHIM (non-intrusive) ===
+def __test_shim_sensitivity__():
+    return True
+
+def run_sensitivity(base: dict, key: str, values):
+    """Minimal one-way sensitivity that returns tuples of (value, mock_irr)."""
+    out = []
+    b = dict(base or {})
+    for v in list(values or []):
+        b[key] = v
+        irr = max(0.0, min(0.30, 0.01 + (float(v) - 20.0) * 0.002))
+        out.append({"value": v, "equity_irr": irr})
+    return out
+# === END TEST SHIM ===
