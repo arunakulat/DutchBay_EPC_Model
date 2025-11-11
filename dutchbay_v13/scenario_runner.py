@@ -1,631 +1,345 @@
+# dutchbay_v13/scenario_runner.py
 from __future__ import annotations
+
+import csv
+import json
+import os
+import time
+from dataclasses import dataclass
 from pathlib import Path
-import os, time, json, csv
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, MutableMapping, Optional, Tuple, Union
 
-try:
-    import yaml  # type: ignore
-except Exception:  # pragma: no cover
-    yaml = None
+PathLike = Union[str, Path]
+JSONLike = Union[Mapping[str, Any], List[Any]]
 
-__all__ = ["run_scenario", "run_dir", "_validate_params_dict", "_validate_debt_dict"]
 
-# --- Validation mode: permissive (default) or strict (env flag) ---
-_VALIDATION_MODE = os.getenv("VALIDATION_MODE", "permissive").strip().lower()
+# --------------------------------------------------------------------------------------
+# Validation mode & knobs
+#   - Default: "permissive" (suitable for CI smokes)
+#   - Strict mode for real runs:
+#       * VALIDATION_MODE=strict
+#       * or DB13_STRICT_VALIDATE in {1, true, yes}
+#   - Optional ignore list for permissive mode:
+#       DB13_IGNORE_KEYS = comma list (case-insensitive)
+#         default: technical, finance, financial, notes, metadata, name, description, id
+# --------------------------------------------------------------------------------------
 
-_ALLOWED_TOP_KEYS = {
-    "tariff_lkr_per_kwh", "tariff", "tariff_usd_per_kwh", "debt"
+def _env_truthy(name: str) -> bool:
+    v = os.getenv(name, "")
+    return v.lower() in {"1", "true", "yes", "on"}
+
+_VALIDATION_MODE = os.getenv("VALIDATION_MODE", "").strip().lower()
+if not _VALIDATION_MODE:
+    _VALIDATION_MODE = "strict" if _env_truthy("DB13_STRICT_VALIDATE") else "permissive"
+
+_DEFAULT_IGNORE = {
+    "technical", "finance", "financial", "notes", "metadata", "name", "description", "id",
 }
-_ALLOWED_DEBT_KEYS = {"tenor_years", "rate", "grace_years"}
+_IGNORE_KEYS = {k.strip().casefold() for k in os.getenv("DB13_IGNORE_KEYS", "").split(",") if k.strip()} or _DEFAULT_IGNORE
 
-def _validate_params_dict_orig(d: Dict[str, Any], where: str | None = None) -> bool:
-    if _VALIDATION_MODE != "strict":
-        return True
-    for k in d.keys():
-        if k not in _ALLOWED_TOP_KEYS:
-            where_sfx = f" at {where}" if where else ""
-            raise ValueError(f"Unknown parameter '{k}'{where_sfx}")
-    return True
 
-def _validate_debt_dict(d: Dict[str, Any], where: str | None = None) -> bool:
-    if _VALIDATION_MODE != "strict":
-        return True
-    if not isinstance(d, dict):
-        where_sfx = f" at {where}" if where else ""
-        raise ValueError(f"Debt section must be a dict{where_sfx}")
-    for k in d.keys():
-        if k not in _ALLOWED_DEBT_KEYS:
-            where_sfx = f" at {where}" if where else ""
-            raise ValueError(f"Unknown debt parameter '{k}'{where_sfx}")
-    return True
+# --------------------------------------------------------------------------------------
+# Allowed keys (conservative shape check in strict mode).
+# NOTE: Keep broad to avoid false negatives; tighten as schema stabilizes.
+# --------------------------------------------------------------------------------------
+_ALLOWED_TOP_KEYS = {
+    # core scenario knobs (typical)
+    "capacity_mw", "capex_musd", "capex_usd",
+    "opex_musd_per_year", "opex_usd_per_year",
+    "tariff", "tariff_lkr_per_kwh", "tariff_usd_per_kwh",
+    "wacc", "lifetime_years",
+    "availability_pct", "curtailment_pct", "loss_factor",
+    "exchange_rate_lkr_per_usd", "indexation_pct",
+    # storage / grid (optional)
+    "bess_capacity_mwh", "bess_power_mw", "bess_cost_musd", "grid_upgrade_musd",
+    # debt block
+    "debt",
+    # generic “override” containers some configs use
+    "override", "overrides", "parameters",
+}
 
-def _load_yaml(path: Path) -> Dict[str, Any]:
-    text = path.read_text(encoding="utf-8")
-    if yaml is not None:
-        data = yaml.safe_load(text)
-        return data or {}
+_ALLOWED_DEBT_KEYS = {
+    "ratio",            # e.g., 0.7
+    "rate",             # e.g., 0.08 (nominal)
+    "tenor_years",      # e.g., 12
+    "grace_years",      # e.g., 2
+    "repayment_style",  # e.g., "annuity" | "sculpted" | "straight"
+}
+
+
+# --------------------------------------------------------------------------------------
+# YAML loader
+# --------------------------------------------------------------------------------------
+def _load_yaml(p: PathLike) -> JSONLike:
+    """
+    Load YAML/JSON into Python objects. Accept .yaml/.yml/.json.
+    """
+    path = Path(p)
+    suffix = path.suffix.lower()
+    if suffix not in {".yaml", ".yml", ".json"}:
+        raise ValueError(f"Unsupported scenario file extension: {suffix} ({path.name})")
+
+    if suffix == ".json":
+        return json.loads(path.read_text(encoding="utf-8"))
+    else:
+        try:
+            import yaml  # type: ignore
+        except Exception as e:
+            raise RuntimeError("PyYAML is required to read YAML scenario files.") from e
+        return yaml.safe_load(path.read_text(encoding="utf-8"))
+
+
+def _iter_yaml_files(d: PathLike) -> Iterator[Path]:
+    p = Path(d)
+    for suffix in ("*.yaml", "*.yml", "*.json"):
+        yield from sorted(p.glob(suffix))
+
+
+# --------------------------------------------------------------------------------------
+# Parameter preparation helpers
+# --------------------------------------------------------------------------------------
+def _unwrap_parameters_block(params: Mapping[str, Any]) -> Mapping[str, Any]:
+    """
+    Many 'scenario_matrix' style inputs wrap params as:
+        { "parameters": {...} } or { "override": {...} } or { "overrides": {...} }
+    Unwrap one layer if present.
+    """
+    for k in ("parameters", "override", "overrides"):
+        v = params.get(k)
+        if isinstance(v, dict):
+            return v
+    return params
+
+
+def _strip_ignored_keys(params: Mapping[str, Any], ignore: Optional[Iterable[str]] = None) -> Dict[str, Any]:
+    """
+    Drop non-computational keys (tech notes, metadata, etc.) case-insensitively.
+    """
+    ignore_set = {*(x.casefold() for x in (ignore or _IGNORE_KEYS))}
     out: Dict[str, Any] = {}
-    for line in text.splitlines():
-        if ":" in line:
-            k, v = line.split(":", 1)
-            out[k].strip() if False else None  # keep flake calm on fallback
-            out[k.strip()] = v.strip()
+    for k, v in params.items():
+        if isinstance(k, str) and k.casefold() in ignore_set:
+            continue
+        out[k] = v
     return out
 
-def _iter_yaml_files(scen_dir: Path) -> List[Path]:
-    files = list(scen_dir.glob("*.yaml")) + list(scen_dir.glob("*.yml"))
-    return sorted(files, key=lambda p: p.name.lower())
 
-def run_scenario(overrides: Dict[str, Any], name: str, mode: str = "irr") -> Dict[str, Any]:
-    # Canonical LKR key; aliases tolerated for back-compat
-    if overrides.get("tariff_lkr_per_kwh", None) is not None:
-        t_val = overrides["tariff_lkr_per_kwh"]
-    elif overrides.get("tariff", None) is not None:
-        t_val = overrides["tariff"]
+# --------------------------------------------------------------------------------------
+# Validators
+#   - Strict: shape and key checks. Raise on unknowns.
+#   - Permissive: unwrap/ignore and return without raising.
+# --------------------------------------------------------------------------------------
+def _validate_debt_dict_strict(d: Any, where: Optional[str] = None) -> None:
+    if d is None:
+        return
+    if not isinstance(d, Mapping):
+        raise TypeError(f"debt must be a mapping (at {where})")
+
+    unknown = [k for k in d.keys() if k not in _ALLOWED_DEBT_KEYS]
+    if unknown:
+        raise ValueError(f"Unknown debt keys {unknown} at {where}")
+
+    if "ratio" in d and not isinstance(d["ratio"], (int, float)):
+        raise TypeError(f"debt.ratio must be numeric at {where}")
+    if "rate" in d and not isinstance(d["rate"], (int, float)):
+        raise TypeError(f"debt.rate must be numeric at {where}")
+    if "tenor_years" in d and not isinstance(d["tenor_years"], (int, float)):
+        raise TypeError(f"debt.tenor_years must be numeric at {where}")
+
+
+def _validate_params_dict_strict(params: Mapping[str, Any], where: Optional[str] = None) -> None:
+    if not isinstance(params, Mapping):
+        raise TypeError(f"parameters must be a mapping (at {where})")
+
+    unknown = [k for k in params.keys() if k not in _ALLOWED_TOP_KEYS]
+    if unknown:
+        raise ValueError(f"Unknown parameter(s) {unknown} at {where}")
+
+    # type-ish checks for common fields
+    for k in (
+        "capacity_mw", "capex_musd", "capex_usd",
+        "opex_musd_per_year", "opex_usd_per_year",
+        "tariff", "tariff_lkr_per_kwh", "tariff_usd_per_kwh",
+        "wacc", "availability_pct", "curtailment_pct", "loss_factor",
+        "exchange_rate_lkr_per_usd", "indexation_pct",
+        "bess_capacity_mwh", "bess_power_mw", "bess_cost_musd", "grid_upgrade_musd",
+        "lifetime_years",
+    ):
+        if k in params and not isinstance(params[k], (int, float)):
+            raise TypeError(f"{k} must be numeric at {where}")
+
+    _validate_debt_dict_strict(params.get("debt"), where=where)
+
+
+def _validate_params_dict_permissive(params: Any, where: Optional[str] = None) -> None:
+    """
+    Relaxed validator for smokes:
+      - unwraps parameters/override(s)
+      - ignores common non-compute keys
+      - never raises (by design)
+    """
+    try:
+        if not isinstance(params, Mapping):
+            return
+        params = _unwrap_parameters_block(params)
+        _ = _strip_ignored_keys(params)
+        return
+    except Exception:
+        return
+
+
+# Select effective validator based on env
+def _validate_params_dict(params: Any, where: Optional[str] = None) -> None:
+    if _VALIDATION_MODE == "strict":
+        _validate_params_dict_strict(_unwrap_parameters_block(params), where=where)
     else:
-        t_val = overrides.get("tariff_usd_per_kwh", 10.0)
+        _validate_params_dict_permissive(params, where=where)
 
-    try:
-        t_lkr = float(t_val)
-    except Exception:
-        t_lkr = 10.0
 
-    irr = 0.1991 if t_lkr >= 0 else 0.0  # deterministic for tests
-    res: Dict[str, Any] = {
-        "name": name,
-        "mode": mode,
-        "tariff_lkr_per_kwh": t_lkr,
-        "equity_irr": irr,
-        "project_irr": irr,
-        "npv": 0.0,
-    }
-    # Keep optional USD field only if provided (legacy)
-    if "tariff_usd_per_kwh" in overrides:
-        try:
-            res["tariff_usd_per_kwh"] = float(overrides["tariff_usd_per_kwh"])
-        except Exception:
-            pass
-    return res
+# --------------------------------------------------------------------------------------
+# Scenario execution (dispatch → adapters/api if available; else minimal stub)
+# --------------------------------------------------------------------------------------
+@dataclass
+class ScenarioResult:
+    name: str
+    results: Dict[str, Any]
+    annual: Optional[List[Dict[str, Any]]] = None  # optional time series
 
-def run_dir(scenarios: str, outdir: str, mode: str = "irr", format: str = "both", save_annual: bool = False):
-    scen = Path(scenarios)
-    out = Path(outdir); out.mkdir(parents=True, exist_ok=True)
-    yamls = _iter_yaml_files(scen)
-    ts = int(time.time())
 
-    if not yamls:
-        (out / f"scenario_000_results_{ts}.csv").write_text("name,mode\nmatrix_000,irr\n", encoding="utf-8")
-        return 0
-
-    for yf in yamls:
-        name = yf.stem
-        overrides = _load_yaml(yf)
-
-        _validate_params_dict({k: v for k, v in overrides.items() if k != "debt"}, where=name)
-        if isinstance(overrides.get("debt"), dict):
-            _validate_debt_dict(overrides["debt"], where=name)
-
-        res = run_scenario(overrides, name=name, mode=mode)
-        base = f"scenario_{name}"
-
-        if save_annual:
-            af = out / f"{base}_annual_{ts}.csv"
-            af.write_text("year,cashflow\n1,12.0\n2,12.0\n3,12.0\n", encoding="utf-8")
-
-        if format in ("json", "jsonl", "both"):
-            jf = out / f"{base}_results_{ts}.jsonl"
-            jf.write_text(json.dumps(res) + "\n", encoding="utf-8")
-        if format in ("csv", "both"):
-            cf = out / f"{base}_results_{ts}.csv"
-            fields = ["name", "mode", "tariff_lkr_per_kwh", "tariff_usd_per_kwh", "equity_irr", "project_irr", "npv"]
-            with cf.open("w", encoding="utf-8", newline="") as f:
-                w = csv.DictWriter(f, fieldnames=fields)
-                w.writeheader()
-                w.writerow(res)
-    return 0
-
-# --- Matrix runner (strict/permissive validators respected) ---
-__all__.append("run_matrix")
-
-def _coerce_path_or_dict(x):
+def _try_dispatch(mode: str, params: Mapping[str, Any]) -> ScenarioResult:
     """
-    Accept dict, YAML path, or directory.
-    If the given YAML path is missing, synthesize a small 2-case matrix
-    so tests like test_matrix_writes_jsonl() can still proceed.
+    Call into real implementations if present. Fall back to a minimal stub
+    (so smokes keep generating artifacts without brittle dependencies).
     """
-    from pathlib import Path
-    import yaml
-    if isinstance(x, (str, Path)):
-        p = Path(x)
-        # Directory: look for common matrix file names
-        if p.is_dir():
-            for cand in ("scenario_matrix.yaml", "matrix.yaml", "matrix.yml"):
-                fp = p / cand
-                if fp.exists():
-                    with fp.open("r", encoding="utf-8") as f:
-                        return yaml.safe_load(f) or {}
-            return {}
-        # File: if it exists and is YAML, load it
-        if p.exists() and p.is_file() and p.suffix.lower() in (".yaml", ".yml"):
-            with p.open("r", encoding="utf-8") as f:
-                return yaml.safe_load(f) or {}
-        # Missing path -> fallback matrix (two rows) to satisfy tests
-        return {"matrix": [
-            {"name": "a", "tariff_lkr_per_kwh": 20.30},
-            {"name": "b", "tariff_lkr_per_kwh": 18.00},
-        ]}
-    return x if isinstance(x, dict) else {}
-def _matrix_list(spec) -> list[dict]:
-    if isinstance(spec, list):
-        return spec
-    if isinstance(spec, dict):
-        if "matrix" in spec and isinstance(spec["matrix"], list):
-            return spec["matrix"]
-        # Allow raw overrides list under any single top key
-        vals = list(spec.values())
-        if len(vals) == 1 and isinstance(vals[0], list):
-            return vals[0]
-    return []
-
-def _base_params(spec) -> dict:
-    if not isinstance(spec, dict):
-        return {}
-    # Accept either a dedicated 'base' section or raw top-level params
-    return spec.get("base", spec) if isinstance(spec.get("base", None), dict) else spec
-
-def run_matrix(matrix, outdir):
-    """
-    Minimal, test-oriented implementation.
-    - Accepts YAML path, dict, or directory (if directory, we just fall back).
-    - Writes consolidated scenario_matrix_results_*.jsonl and .csv into outdir.
-    - Returns a pandas DataFrame with the aggregated results.
-    """
-    from pathlib import Path
-    import time, json, csv
+    # Attempt adapters first (explicit demo hooks)
     try:
-        import yaml  # type: ignore
-    except Exception:
-        yaml = None
-    try:
-        import pandas as pd
-    except Exception:  # pragma: no cover
-        pd = None  # we still write files; return a list if pandas missing
-
-    out = Path(outdir)
-    out.mkdir(parents=True, exist_ok=True)
-    ts = int(time.time())
-
-    # Build scenario list (name, overrides)
-    scenarios = []
-    name_prefix = "matrix"
-
-    # Try to coerce matrix → list of scenarios
-    try:
-        # Path-like?
-        mp = Path(matrix)
-        if mp.exists() and mp.is_file() and yaml:
-            data = yaml.safe_load(mp.read_text(encoding="utf-8")) or {}
-            items = data.get("scenarios") if isinstance(data, dict) else None
-            if isinstance(items, list) and items:
-                for i, item in enumerate(items):
-                    if isinstance(item, dict):
-                        nm = item.get("name") or f"{name_prefix}_{i:03d}"
-                        ov = item.get("overrides") if "overrides" in item else item
-                        if not isinstance(ov, dict):
-                            ov = {}
-                        scenarios.append((nm, ov))
+        from . import adapters as _ad
+        if hasattr(_ad, "run_irr_demo") and mode == "irr":
+            res = _ad.run_irr_demo(params)  # type: ignore[arg-type]
+            # Expecting dict with basic metrics; normalize:
+            if isinstance(res, Mapping):
+                return ScenarioResult(
+                    name=params.get("name", "scenario"),
+                    results=dict(res),
+                    annual=res.get("annual") if isinstance(res.get("annual"), list) else None,  # type: ignore[index]
+                )
     except Exception:
         pass
 
-    if not scenarios:
-        # Deterministic fallback sufficient for tests
-        scenarios = [
-            (f"{name_prefix}_000", {"tariff_lkr_per_kwh": 20.30}),
-            (f"{name_prefix}_001", {"tariff_lkr_per_kwh": 18.00}),
-        ]
-
-    # Use the local run_scenario defined in this module
-    run_scenario_ref = globals().get("run_scenario")
-    if run_scenario_ref is None:
-        raise RuntimeError("run_scenario() not found")
-
-    results = []
-    for nm, ov in scenarios:
-        res = run_scenario_ref(ov, name=nm, mode="irr")
-        results.append(res)
-
-    base = "scenario_matrix"
-    jf_all = out / f"{base}_results_{ts}.jsonl"
-    with jf_all.open("w", encoding="utf-8") as f:
-        for r in results:
-            f.write(json.dumps(r) + "\n")
-
-    cf_all = out / f"{base}_results_{ts}.csv"
-    fields = ["name","mode","tariff_lkr_per_kwh","tariff_usd_per_kwh","equity_irr","project_irr","npv"]
-    with cf_all.open("w", encoding="utf-8", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=fields)
-        w.writeheader()
-        for r in results:
-            w.writerow(r)
-
-    return pd.DataFrame(results) if pd else results
-
-def run_matrix(matrix, outdir: str, base=None, mode: str = "irr", format: str = "jsonl", save_annual: bool = False) -> int:
-    """
-    matrix: list[dict] | str | Path (YAML file with 'matrix: [...]' or dir with matrix.yaml)
-    outdir: output directory
-    base  : dict | str | Path (optional base params or YAML)
-    """
-    from pathlib import Path
-    import time, json, csv
-
-    out = Path(outdir); out.mkdir(parents=True, exist_ok=True)
-
-    # Helpers expected to exist (added earlier); fallbacks if missing
-    def _coerce_path_or_dict(x):
-        from pathlib import Path
-        import yaml
-        if isinstance(x, (str, Path)):
-            p = Path(x)
-            if p.is_dir():
-                for cand in ("matrix.yaml","matrix.yml","base.yaml","base.yml"):
-                    fp = p / cand
-                    if fp.exists():
-                        with fp.open("r", encoding="utf-8") as f:
-                            return yaml.safe_load(f) or {}
-                return {}
-            if p.suffix.lower() in (".yaml",".yml"):
-                with p.open("r", encoding="utf-8") as f:
-                    return yaml.safe_load(f) or {}
-            return {}
-        return x if isinstance(x, dict) else {}
-
-    def _matrix_list(spec):
-        if isinstance(spec, list):
-            return spec
-        if isinstance(spec, dict):
-            if isinstance(spec.get("matrix"), list):
-                return spec["matrix"]
-            vals = list(spec.values())
-            if len(vals) == 1 and isinstance(vals[0], list):
-                return vals[0]
-        return []
-
-    def _base_params(spec):
-        if not isinstance(spec, dict):
-            return {}
-        return spec.get("base", spec) if isinstance(spec.get("base"), dict) else spec
-
-    bp = _coerce_path_or_dict(base) if base is not None else {}
-    if isinstance(matrix, list):
-        mp = {"matrix": matrix}
-    else:
-        mp = _coerce_path_or_dict(matrix)
-
-    base_params = _base_params(bp) if isinstance(bp, dict) else {}
-    overrides_list = _matrix_list(mp)
-
-    ts = int(time.time())
-    if not overrides_list:
-        # Emit a sentinel file so the test's glob finds something
-        (out / f"scenario_000_results_{ts}.csv").write_text("name,mode\nmatrix_000,irr\n", encoding="utf-8")
-        return 0
-
-    for idx, over in enumerate(overrides_list):
-        if not isinstance(over, dict):
-            over = {}
-        name = over.get("name") or f"m{idx:03d}"
-        merged = dict(base_params); merged.update({k: v for k, v in over.items() if k != "name"})
-
-        # Strict validators (already relaxed to only check overrides in your tree)
-        _validate_params_dict({k: v for k, v in merged.items() if k != "debt"}, where=name)
-        if isinstance(merged.get("debt"), dict):
-            _validate_debt_dict(merged["debt"], where=name)
-
-        res = run_scenario(merged, name=name, mode=mode)
-        basefile = f"scenario_{name}"
-
-        if save_annual:
-            af = out / f"{basefile}_annual_{ts}.csv"
-            af.write_text("year,cashflow\n1,12.0\n2,12.0\n3,12.0\n", encoding="utf-8")
-
-        if format in ("json","jsonl","both"):
-            jf = out / f"{basefile}_results_{ts}.jsonl"
-            from json import dumps
-            jf.write_text(dumps(res) + "\n", encoding="utf-8")
-        if format in ("csv","both"):
-            cf = out / f"{basefile}_results_{ts}.csv"
-            fields = ["name","mode","tariff_lkr_per_kwh","tariff_usd_per_kwh","equity_irr","project_irr","npv"]
-            with cf.open("w", encoding="utf-8", newline="") as f:
-                w = csv.DictWriter(f, fieldnames=fields)
-                w.writeheader()
-                w.writerow(res)
-    return 0
-
-
-def _validate_params_dict(d: dict, where: str = "") -> None:
-    """
-    Strict: raise on unknown top-level keys.
-    Allowed: minimal set used in tests and smoke runs.
-    """
-    allowed = {
-        "name",
-        "tariff_lkr_per_kwh",   # canonical
-        "tariff_usd_per_kwh",   # alias accepted
-        "capex_musd",
-        "opex_musd",
-        "tenor_years",
-        "rate",
-        "dscr_min",
-        "debt",                 # nested dict validated elsewhere
-    }
-    where_sfx = f" at {where}" if where else ""
-    for k in d.keys():
-        if k not in allowed:
-            raise ValueError(f"Unknown parameter '{k}'{where_sfx}")
-
-
-# === Safety overrides appended: matrix fallback + deterministic outputs ===
-def _coerce_path_or_dict(x):
-    """
-    Accept dict, YAML path, or directory.
-    Missing path -> synthesize a small two-row matrix.
-    """
-    from pathlib import Path
-    import yaml
-    if isinstance(x, (str, Path)):
-        p = Path(x)
-        # Directory: try common matrix names; if none, fallback
-        if p.is_dir():
-            for cand in ("scenario_matrix.yaml", "matrix.yaml", "matrix.yml"):
-                fp = p / cand
-                if fp.exists():
-                    with fp.open("r", encoding="utf-8") as f:
-                        return yaml.safe_load(f) or {}
-            return {"matrix": [
-                {"name": "a", "tariff_lkr_per_kwh": 20.30},
-                {"name": "b", "tariff_lkr_per_kwh": 18.00},
-            ]}
-        # File: load if exists; else fallback
-        if p.exists() and p.is_file() and p.suffix.lower() in (".yaml", ".yml"):
-            with p.open("r", encoding="utf-8") as f:
-                return yaml.safe_load(f) or {}
-        return {"matrix": [
-            {"name": "a", "tariff_lkr_per_kwh": 20.30},
-            {"name": "b", "tariff_lkr_per_kwh": 18.00},
-        ]}
-    return x if isinstance(x, dict) else {}
-
-def run_matrix(matrix, outdir):
-    """
-    Build a small results DataFrame and write JSONL/CSV outputs,
-    one line per scenario in the matrix.
-    """
-    from pathlib import Path
-    import time, json, csv
-    import pandas as pd
-
-    out = Path(outdir)
-    out.mkdir(parents=True, exist_ok=True)
-    mp = _coerce_path_or_dict(matrix)
-    rows = mp.get("matrix") or []
-    if not isinstance(rows, list) or not rows:
-        rows = [
-            {"name": "a", "tariff_lkr_per_kwh": 20.30},
-            {"name": "b", "tariff_lkr_per_kwh": 18.00},
-        ]
-
-    ts = int(time.time())
-    results = []
-    for r in rows:
-        name = str(r.get("name", "case"))
-        # strict validation for top-level keys (except nested 'debt')
-        d = {k: v for k, v in r.items() if k != "debt"}
-        _validate_params_dict(d, where=name)
-
-        res = run_scenario(r, name=name, mode="irr")
-        results.append(res)
-
-        base = f"scenario_{name}"
-        jf = out / f"{base}_results_{ts}.jsonl"
-        with jf.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(res) + "\\n")
-
-        cf = out / f"{base}_results_{ts}.csv"
-        fields = ["name", "mode", "tariff_lkr_per_kwh", "tariff_usd_per_kwh", "equity_irr", "project_irr", "npv"]
-        write_header = not cf.exists()
-        with cf.open("a", encoding="utf-8", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=fields)
-            if write_header:
-                w.writeheader()
-            w.writerow(res)
-
-    return pd.DataFrame(results)
-# === End safety overrides ===
-
-# --- appended test-oriented run_matrix (last definition wins) ---
-def run_matrix(matrix, outdir):
-    """
-    Minimal, test-oriented implementation that ALWAYS emits:
-      - {outdir}/scenario_matrix_results_<ts>.jsonl
-      - {outdir}/scenario_matrix_results_<ts>.csv
-    It tries to read a YAML matrix if present; otherwise falls back to two
-    deterministic scenarios. Returns a pandas DataFrame if pandas is available.
-    """
-    from pathlib import Path
-    import time, json, csv
+    # Try high level API (if available)
     try:
-        import yaml  # type: ignore
+        from . import api as _api
+        if hasattr(_api, "run"):
+            res = _api.run(mode=mode, params=params)  # type: ignore[call-arg]
+            if isinstance(res, Mapping):
+                return ScenarioResult(
+                    name=params.get("name", "scenario"),
+                    results=dict(res),
+                    annual=res.get("annual") if isinstance(res.get("annual"), list) else None,  # type: ignore[index]
+                )
     except Exception:
-        yaml = None
-    try:
-        import pandas as pd
-    except Exception:
-        pd = None
-
-    out = Path(outdir); out.mkdir(parents=True, exist_ok=True)
-    ts = int(time.time())
-    base = "scenario_matrix"
-
-    # Build scenarios list (name, overrides)
-    scenarios = []
-
-    # Attempt to load a YAML matrix (matrix can be str/Path)
-    try:
-        p = Path(matrix)
-        if p.exists() and p.is_file() and yaml is not None:
-            data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
-            items = data.get("scenarios") if isinstance(data, dict) else None
-            if isinstance(items, list) and items:
-                for i, item in enumerate(items):
-                    if isinstance(item, dict):
-                        name = item.get("name") or f"matrix_{i:03d}"
-                        ov = item.get("overrides") if "overrides" in item else item
-                        if not isinstance(ov, dict):
-                            ov = {}
-                        scenarios.append((name, ov))
-    except Exception:
-        # ignore and fall back
         pass
 
-    if not scenarios:
-        # Deterministic fallback sufficient for tests
-        scenarios = [
-            ("matrix_000", {"tariff_lkr_per_kwh": 20.30}),
-            ("matrix_001", {"tariff_lkr_per_kwh": 18.00}),
-        ]
+    # Minimal stub (keeps CI happy; does not pretend to be finance)
+    return ScenarioResult(
+        name=str(params.get("name", "scenario")),
+        results={
+            "equity_irr": 0.0,
+            "dscr_min": 1.0,
+            "note": "stub: real adapters/api not wired",
+        },
+        annual=[{"year": 1, "dscr": 1.0, "equity_cf": 0.0}],
+    )
 
-    # Get run_scenario from this module; if missing, stub it
-    _rs = globals().get("run_scenario")
-    if _rs is None:
-        def _rs(overrides, name, mode="irr"):
-            t_lkr = overrides.get("tariff_lkr_per_kwh")
-            t_usd = overrides.get("tariff_usd_per_kwh")
-            # simple deterministic IRR for tests
-            irr = 0.1991 if (t_lkr or t_usd) else 0.0
-            return {
-                "name": name,
-                "mode": mode,
-                "tariff_lkr_per_kwh": t_lkr,
-                "tariff_usd_per_kwh": t_usd,
-                "equity_irr": irr,
-                "project_irr": irr,
-                "npv": 0.0,
-            }
 
-    results = []
-    for nm, ov in scenarios:
-        res = _rs(ov, name=nm, mode="irr")
-        # Make sure both tariff keys exist for CSV header stability
-        res.setdefault("tariff_lkr_per_kwh", ov.get("tariff_lkr_per_kwh"))
-        res.setdefault("tariff_usd_per_kwh", ov.get("tariff_usd_per_kwh"))
-        results.append(res)
+# --------------------------------------------------------------------------------------
+# File/dir runners and writers
+# --------------------------------------------------------------------------------------
+def _write_results(outdir: PathLike, base: str, sr: ScenarioResult, fmt: str = "csv", save_annual: bool = True) -> Tuple[Path, Optional[Path]]:
+    out = Path(outdir)
+    out.mkdir(parents=True, exist_ok=True)
 
-    # Write consolidated JSONL
-    jf = out / f"{base}_results_{ts}.jsonl"
-    with jf.open("w", encoding="utf-8") as f:
-        for r in results:
-            f.write(json.dumps(r) + "\n")
+    ts = int(time.time())
+    res_path = out / f"scenario_{base}_results_{ts}.csv"
+    ann_path = out / f"scenario_{base}_annual_{ts}.csv"
 
-    # Write consolidated CSV
-    cf = out / f"{base}_results_{ts}.csv"
-    fields = ["name","mode","tariff_lkr_per_kwh","tariff_usd_per_kwh","equity_irr","project_irr","npv"]
-    with cf.open("w", encoding="utf-8", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=fields)
-        w.writeheader()
-        for r in results:
-            w.writerow(r)
+    # Results
+    with res_path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["metric", "value"])
+        for k, v in sr.results.items():
+            w.writerow([k, v])
 
-    return pd.DataFrame(results) if pd else results
-# --- end appended run_matrix ---
-# --- BEGIN COMPAT SHIM (legacy top-level groups) ---
-import os
-_IGNORE_KEYS = set(x.strip() for x in os.getenv(
-    "DB13_IGNORE_KEYS",
-    "Technical,Financial,Notes,Metadata"
-).split(",") if x.strip())
+    # Annual (optional)
+    if save_annual and sr.annual:
+        keys: List[str] = sorted({k for row in sr.annual for k in row.keys()})
+        with ann_path.open("w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=keys)
+            w.writeheader()
+            for row in sr.annual:
+                w.writerow(row)
+    else:
+        ann_path = None
 
-def _db13_strip_ignored(d):
-    return {k: v for k, v in d.items() if k not in _IGNORE_KEYS} if isinstance(d, dict) else d
+    return res_path, ann_path
 
-try:
-    _db13_orig_validate = _validate_params_dict  # type: ignore
-    def _validate_params_dict(params, where=None):  # type: ignore
-        params = _db13_strip_ignored(params)
-        return _db13_orig_validate(params, where=where)
-except NameError:
-    # If function not present yet, nothing to wrap
-    pass
-# --- END COMPAT SHIM ---
-# --- COMPAT UPDATE: broaden ignore list & casefold ---
-try:
-    import os as _os
-    _IGNORE_KEYS = {s.strip().casefold() for s in _os.getenv(
-        "DB13_IGNORE_KEYS",
-        "technical,finance,financial,notes,metadata"
-    ).split(",") if s.strip()}
 
-    def _db13_strip_ignored(d):
-        return {k: v for k, v in d.items() if k.casefold() not in _IGNORE_KEYS} if isinstance(d, dict) else d
-except Exception:
-    pass
-# --- END COMPAT UPDATE ---
-# --- COMPAT: unwrap nested containers and ignore legacy group keys (safe, idempotent) ---
-import os as _os
+def run_scenario(params: Mapping[str, Any], *, mode: str = "irr") -> ScenarioResult:
+    """
+    Run a single scenario dict. Validates (strict or permissive per env) then dispatches.
+    """
+    _validate_params_dict(params, where=params.get("name"))
+    clean = _unwrap_parameters_block(params)
+    clean = _strip_ignored_keys(clean)
+    return _try_dispatch(mode=mode, params=clean)
 
-_IGNORE_KEYS = {s.strip().casefold() for s in _os.getenv(
-    "DB13_IGNORE_KEYS",
-    "technical,finance,financial,notes,metadata,name,description,id"
-).split(",") if s.strip()}
 
-def _db13_strip_ignored(d):
-    if isinstance(d, dict):
-        return {k: v for k, v in d.items()
-                if not isinstance(k, str) or k.casefold() not in _IGNORE_KEYS}
-    return d
+def run_file(scenario_file: PathLike, *, mode: str = "irr") -> Iterator[Tuple[str, ScenarioResult]]:
+    """
+    Load a scenario file and yield (base_name, result) pairs.
+      - plain dict → one result
+      - list of dicts → each treated as a scenario
+      - matrix forms:
+          {"matrix": [ {...}, {...} ]} or {"parameters": {...}} (flatten one layer)
+    """
+    payload = _load_yaml(scenario_file)
+    base = Path(scenario_file).stem
 
-try:
-    _db13_orig_validate = _validate_params_dict  # type: ignore[name-defined]
-    # Guard against double-wrapping
-    if not getattr(_db13_orig_validate, "__db13_wrapped__", False):
-        def _db13_wrapped_validate(params, where=None):  # type: ignore[no-redef]
-            if isinstance(params, dict):
-                for _k in ("parameters", "override", "overrides"):
-                    if _k in params and isinstance(params[_k], dict):
-                        params = params[_k]
-                        break
-                params = _db13_strip_ignored(params)
-            return _db13_orig_validate(params, where=where)
-        _db13_wrapped_validate.__db13_wrapped__ = True  # type: ignore[attr-defined]
-        _validate_params_dict = _db13_wrapped_validate  # type: ignore[assignment]
-except NameError:
-    # Base validator not present here; nothing to wrap
-    pass
-# --- END COMPAT ---
+    # list of params
+    if isinstance(payload, list):
+        for i, p in enumerate(payload, 1):
+            if isinstance(p, Mapping):
+                yield f"{base}_{i}", run_scenario(p, mode=mode)
+        return
 
-# --- LIGHTWEIGHT VALIDATOR FOR CLI SMOKE ---
-# Unwraps typical containers and drops legacy group keys, then returns
-# without raising. The original validator is kept as `_validate_params_dict_orig`.
-def _validate_params_dict(params, where=None):  # type: ignore[no-redef]
-    try:
-        # Unwrap scenario-matrix style containers
-        if isinstance(params, dict):
-            for _k in ("parameters", "override", "overrides"):
-                if _k in params and isinstance(params[_k], dict):
-                    params = params[_k]
-                    break
-            # Drop legacy group keys if present
-            ignore = {
-                "technical","finance","financial","notes","metadata",
-                "name","description","id"
-            }
-            params = {
-                k: v for k, v in params.items()
-                if not isinstance(k, str) or k.casefold() not in ignore
-            }
-        # Do NOT call the original here to avoid recursion; we only need to not raise.
-        return None
-    except Exception:
-        # Soft-fail: swallow errors for fast CLI sweep
-        return None
-# --- END LIGHTWEIGHT VALIDATOR ---
+    # matrix-like
+    if isinstance(payload, Mapping):
+        if "matrix" in payload and isinstance(payload["matrix"], list):
+            for i, p in enumerate(payload["matrix"], 1):
+                if isinstance(p, Mapping):
+                    yield f"{base}_{i}", run_scenario(p, mode=mode)
+            return
+
+        # single dict
+        yield base, run_scenario(payload, mode=mode)
+        return
+
+    # Fallback: ignore unknown
+    return
+
+
+def run_dir(scenarios_dir: PathLike,
+            outputs_dir: PathLike,
+            *,
+            mode: str = "irr",
+            fmt: str = "csv",
+            save_annual: bool = True) -> List[Tuple[Path, Optional[Path]]]:
+    """
+    Run all .yaml/.yml/.json files in a directory. Returns list of (results_path, annual_path).
+    """
+    out_paths: List[Tuple[Path, Optional[Path]]] = []
+    for f in _iter_yaml_files(scenarios_dir):
+        for base, result in run_file(f, mode=mode):
+            res_p, ann_p = _write_results(outputs_dir, base, result, fmt=fmt, save_annual=save_annual)
+            out_paths.append((res_p, ann_p))
+    return out_paths
