@@ -1,86 +1,81 @@
-Technical:
-  nameplate_mw: 150
-  cf_p50: 0.40
-  project_life_years: 20
-  hours_per_year: 8760
-  yearly_degradation: 0.006
+# full_model_variables_updated.yaml  (repo root)
+# Master inputs for Dutch Bay wind appraisal — all policy/assumptions live here.
 
-Financial:
-  total_capex: 155000000
-  contingency_pct: 0.03
-  discount_rate: 0.07
-  tax_rate: 0.30
-  decommissioning_pct: 0.003
-  sscl_rate: 0.025  # ← Added here
+project:
+  name: Dutch Bay Wind Project
+  capacity_mw: 150            # variable: 90..150 by scenarios
+  capacity_factor: 0.40       # or use availability_pct/loss_factor instead
+  degradation: 0.006          # per-year energy degradation (fraction, 0..1)
 
-Scenario_Assumptions:
-  fx_depreciation_annual_pct: 0.03
-  lkr_opex_escalation_pct: 0.05
-  usd_opex_escalation_pct: 0.02
-  base_case_aep_gwh: 600
-  p75_aep_gwh: 570
-  p90_aep_gwh: 540
+  timeline:
+    # nominal operating life (exclude construction); adapter uses this length to build series
+    lifetime_years: 20
 
-FX_OPEX:
-  opex_usd_per_mwh: null
-  opex_components:
-    o&m_services: 3.5
-    insurance: 1.0
-    land_lease: 0.05
-    grid_charges: 0.5
-    admin_gna: 0.1
-  opex_total_usd_m: null
-  opex_currency_mix:
-    lkr_pct: 70
-    usd_pct: 30
-  debt_currency_mix:
-    usd_pct: 55
-    lkr_pct: 45
+tariff:
+  # The PPA is in LKR, unindexed. Use this key; adapters convert via FX per year.
+  lkr_per_kwh: 20.30
 
-Sensitivity_Parameters:
-  capex_increase_pct: 0.15
-  opex_increase_pct: 0.15
-  fx_stress_pct: 0.2
-  generation_variance_pct: 0.1
-  min_dscr_threshold: 1.25
-  tariff_delay_days: 180
+fx:
+  # Either give explicit curve, OR start + annual depreciation
+  start_lkr_per_usd: 300
+  annual_depr: 0.03
+  # curve_lkr_per_usd: []  # optional explicit list if you want to override start+depr
 
-Debt_Structure:
-  debt_ratio: 0.80
-  grace_years: 1
-  debt_tenor_years: 16
-  tenor_years: 16         # ← Added as fallback alias
-  usd_dfi_pct: 0.10      # ← Added here
-  usd_debt_ratio: 0.55
-  lkr_debt_ratio: 0.45
-  usd_dfi_rate: 0.065
-  usd_mkt_rate: 0.07
-  lkr_rate: 0.08
-  principal_pct_1_4: 0.80
-  principal_pct_5_on: 0.20
+capex:
+  # Provide either total or per-MW; no floors here (enforced by validation/scenarios).
+  usd_total: 225000000        # example: 225 MUSD total
+  # usd_per_mw: 1500000       # alternative shape
 
-Tariff_Revenue:
-  tariff_lkr_kwh: 20.36
-  tariff_usd_per_kwh: 0.06787
-  fx_initial: 338         # FX at COD (not today's rate)
-  fx_rate_today: 300      # Optional, for tracking assumptions
-  fx_depr: 0.03
+opex:
+  # You may combine fixed and per-MWh, and combine USD + LKR legs; adapter sums them.
+  usd_per_year: 6000000       # example: 6 MUSD/y total
+  # lkr_per_year: 0
+  # usd_per_mwh: 0
+  # lkr_per_mwh: 0
 
-OPEX:
-  opex_usd_mwh: null
-  opex_esc_lkr: 0.05
-  opex_esc_usd: 0.02
-  opex_split_lkr: 0.7
-  opex_split_usd: 0.3
+# ---------------------------
+# Financing terms (schema-backed; nested form)
+# ---------------------------
+Financing_Terms:
+  # Debt sizing and style
+  debt_ratio: 0.70
+  tenor_years: 15
+  interest_only_years: 2
+  amortization_style: auto      # auto | target_dscr | annuity | straight_line
 
-Return_Constraints:
-  min_dscr: null  
-  equity_irr: null
-  optimized_project_irr: null
-  optimized_equity_irr: null
-  npv_12pct: null
+  # Rate input style – pick ONE: interest_rate_nominal OR (base_rate + margin_bps)
+  interest_rate_nominal: 0.08   # decimal (8%)
 
-Sensitivity_Analysis:
-  capex_increase_pct: 0.15
-  opex_increase_pct: 0.15
-  fx_stress_pct: 0.15
+  # Tranche mix caps (total debt composition)
+  mix:
+    lkr_max: 0.45               # ≤ 45% of total debt in LKR
+    dfi_max: 0.10               # ≤ 10% of total debt from DFI
+    usd_commercial_min: 0.45    # optional floor for USD commercial
+
+  # Tranche rate floors (decimal)
+  rates:
+    lkr_min: 0.08               # ≥ 8% for LKR leg
+    usd_commercial_min: 0.075   # ≥ 7.5% for USD commercial
+    dfi_min: 0.065              # ≥ 6.5% for DFI
+
+  # DSCR sculpting & covenant
+  target_dscr: 1.30
+  min_dscr: 1.20
+  dscr_probability_basis: P50   # or P90; optional dscr_haircut_factor instead
+  # dscr_haircut_factor: 0.90
+
+  # Reserves / receivables guarantee
+  reserves:
+    dsra_months: 6              # 0 if you rely on receivables guarantee
+    receivables_guarantee_months: 9
+  use_revenue_guarantee: false
+  guarantee_revenue_pct: 0.0075 # 0.75% of annual revenue as fee proxy
+  guarantee_max_months: 9
+
+  # Fees (optional)
+  fees:
+    upfront_pct: 0.00
+    commitment_pct: 0.00
+
+  # Hard covenant enforcement
+  enforce_hard_covenants: false # set true to raise on dscr_min<min_dscr or balloon>0 at maturity

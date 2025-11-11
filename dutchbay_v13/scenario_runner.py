@@ -1,345 +1,197 @@
 # dutchbay_v13/scenario_runner.py
 from __future__ import annotations
 
-import csv
-import json
-import os
-import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Mapping, MutableMapping, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Tuple
 
-PathLike = Union[str, Path]
-JSONLike = Union[Mapping[str, Any], List[Any]]
+import json
+import os
+import sys
 
+try:
+    import yaml  # type: ignore
+except Exception as e:  # pragma: no cover
+    raise RuntimeError("PyYAML is required") from e
 
-# --------------------------------------------------------------------------------------
-# Validation mode & knobs
-#   - Default: "permissive" (suitable for CI smokes)
-#   - Strict mode for real runs:
-#       * VALIDATION_MODE=strict
-#       * or DB13_STRICT_VALIDATE in {1, true, yes}
-#   - Optional ignore list for permissive mode:
-#       DB13_IGNORE_KEYS = comma list (case-insensitive)
-#         default: technical, finance, financial, notes, metadata, name, description, id
-# --------------------------------------------------------------------------------------
-
-def _env_truthy(name: str) -> bool:
-    v = os.getenv(name, "")
-    return v.lower() in {"1", "true", "yes", "on"}
-
-_VALIDATION_MODE = os.getenv("VALIDATION_MODE", "").strip().lower()
-if not _VALIDATION_MODE:
-    _VALIDATION_MODE = "strict" if _env_truthy("DB13_STRICT_VALIDATE") else "permissive"
-
-_DEFAULT_IGNORE = {
-    "technical", "finance", "financial", "notes", "metadata", "name", "description", "id",
-}
-_IGNORE_KEYS = {k.strip().casefold() for k in os.getenv("DB13_IGNORE_KEYS", "").split(",") if k.strip()} or _DEFAULT_IGNORE
+# Local, lightweight deps only
+from .validate import validate_params  # env-aware via VALIDATION_MODE handled inside validate.py
+from .adapters import run_irr  # core calc; debt layer applied inside adapters
 
 
-# --------------------------------------------------------------------------------------
-# Allowed keys (conservative shape check in strict mode).
-# NOTE: Keep broad to avoid false negatives; tighten as schema stabilizes.
-# --------------------------------------------------------------------------------------
-_ALLOWED_TOP_KEYS = {
-    # core scenario knobs (typical)
-    "capacity_mw", "capex_musd", "capex_usd",
-    "opex_musd_per_year", "opex_usd_per_year",
-    "tariff", "tariff_lkr_per_kwh", "tariff_usd_per_kwh",
-    "wacc", "lifetime_years",
-    "availability_pct", "curtailment_pct", "loss_factor",
-    "exchange_rate_lkr_per_usd", "indexation_pct",
-    # storage / grid (optional)
-    "bess_capacity_mwh", "bess_power_mw", "bess_cost_musd", "grid_upgrade_musd",
-    # debt block
-    "debt",
-    # generic “override” containers some configs use
-    "override", "overrides", "parameters",
-}
+# ---------------------------
+# Helpers (pure & side-effect free)
+# ---------------------------
 
-_ALLOWED_DEBT_KEYS = {
-    "ratio",            # e.g., 0.7
-    "rate",             # e.g., 0.08 (nominal)
-    "tenor_years",      # e.g., 12
-    "grace_years",      # e.g., 2
-    "repayment_style",  # e.g., "annuity" | "sculpted" | "straight"
-}
-
-
-# --------------------------------------------------------------------------------------
-# YAML loader
-# --------------------------------------------------------------------------------------
-def _load_yaml(p: PathLike) -> JSONLike:
-    """
-    Load YAML/JSON into Python objects. Accept .yaml/.yml/.json.
-    """
-    path = Path(p)
-    suffix = path.suffix.lower()
-    if suffix not in {".yaml", ".yml", ".json"}:
-        raise ValueError(f"Unsupported scenario file extension: {suffix} ({path.name})")
-
-    if suffix == ".json":
-        return json.loads(path.read_text(encoding="utf-8"))
-    else:
-        try:
-            import yaml  # type: ignore
-        except Exception as e:
-            raise RuntimeError("PyYAML is required to read YAML scenario files.") from e
-        return yaml.safe_load(path.read_text(encoding="utf-8"))
-
-
-def _iter_yaml_files(d: PathLike) -> Iterator[Path]:
-    p = Path(d)
-    for suffix in ("*.yaml", "*.yml", "*.json"):
-        yield from sorted(p.glob(suffix))
-
-
-# --------------------------------------------------------------------------------------
-# Parameter preparation helpers
-# --------------------------------------------------------------------------------------
-def _unwrap_parameters_block(params: Mapping[str, Any]) -> Mapping[str, Any]:
-    """
-    Many 'scenario_matrix' style inputs wrap params as:
-        { "parameters": {...} } or { "override": {...} } or { "overrides": {...} }
-    Unwrap one layer if present.
-    """
-    for k in ("parameters", "override", "overrides"):
-        v = params.get(k)
-        if isinstance(v, dict):
-            return v
-    return params
-
-
-def _strip_ignored_keys(params: Mapping[str, Any], ignore: Optional[Iterable[str]] = None) -> Dict[str, Any]:
-    """
-    Drop non-computational keys (tech notes, metadata, etc.) case-insensitively.
-    """
-    ignore_set = {*(x.casefold() for x in (ignore or _IGNORE_KEYS))}
-    out: Dict[str, Any] = {}
-    for k, v in params.items():
-        if isinstance(k, str) and k.casefold() in ignore_set:
-            continue
-        out[k] = v
-    return out
-
-
-# --------------------------------------------------------------------------------------
-# Validators
-#   - Strict: shape and key checks. Raise on unknowns.
-#   - Permissive: unwrap/ignore and return without raising.
-# --------------------------------------------------------------------------------------
-def _validate_debt_dict_strict(d: Any, where: Optional[str] = None) -> None:
-    if d is None:
-        return
-    if not isinstance(d, Mapping):
-        raise TypeError(f"debt must be a mapping (at {where})")
-
-    unknown = [k for k in d.keys() if k not in _ALLOWED_DEBT_KEYS]
-    if unknown:
-        raise ValueError(f"Unknown debt keys {unknown} at {where}")
-
-    if "ratio" in d and not isinstance(d["ratio"], (int, float)):
-        raise TypeError(f"debt.ratio must be numeric at {where}")
-    if "rate" in d and not isinstance(d["rate"], (int, float)):
-        raise TypeError(f"debt.rate must be numeric at {where}")
-    if "tenor_years" in d and not isinstance(d["tenor_years"], (int, float)):
-        raise TypeError(f"debt.tenor_years must be numeric at {where}")
-
-
-def _validate_params_dict_strict(params: Mapping[str, Any], where: Optional[str] = None) -> None:
-    if not isinstance(params, Mapping):
-        raise TypeError(f"parameters must be a mapping (at {where})")
-
-    unknown = [k for k in params.keys() if k not in _ALLOWED_TOP_KEYS]
-    if unknown:
-        raise ValueError(f"Unknown parameter(s) {unknown} at {where}")
-
-    # type-ish checks for common fields
-    for k in (
-        "capacity_mw", "capex_musd", "capex_usd",
-        "opex_musd_per_year", "opex_usd_per_year",
-        "tariff", "tariff_lkr_per_kwh", "tariff_usd_per_kwh",
-        "wacc", "availability_pct", "curtailment_pct", "loss_factor",
-        "exchange_rate_lkr_per_usd", "indexation_pct",
-        "bess_capacity_mwh", "bess_power_mw", "bess_cost_musd", "grid_upgrade_musd",
-        "lifetime_years",
-    ):
-        if k in params and not isinstance(params[k], (int, float)):
-            raise TypeError(f"{k} must be numeric at {where}")
-
-    _validate_debt_dict_strict(params.get("debt"), where=where)
-
-
-def _validate_params_dict_permissive(params: Any, where: Optional[str] = None) -> None:
-    """
-    Relaxed validator for smokes:
-      - unwraps parameters/override(s)
-      - ignores common non-compute keys
-      - never raises (by design)
-    """
-    try:
-        if not isinstance(params, Mapping):
-            return
-        params = _unwrap_parameters_block(params)
-        _ = _strip_ignored_keys(params)
-        return
-    except Exception:
-        return
-
-
-# Select effective validator based on env
-def _validate_params_dict(params: Any, where: Optional[str] = None) -> None:
-    if _VALIDATION_MODE == "strict":
-        _validate_params_dict_strict(_unwrap_parameters_block(params), where=where)
-    else:
-        _validate_params_dict_permissive(params, where=where)
-
-
-# --------------------------------------------------------------------------------------
-# Scenario execution (dispatch → adapters/api if available; else minimal stub)
-# --------------------------------------------------------------------------------------
-@dataclass
-class ScenarioResult:
+@dataclass(frozen=True)
+class RunResult:
     name: str
-    results: Dict[str, Any]
-    annual: Optional[List[Dict[str, Any]]] = None  # optional time series
+    summary: Dict[str, Any]
+    annual: List[Dict[str, Any]]
 
 
-def _try_dispatch(mode: str, params: Mapping[str, Any]) -> ScenarioResult:
-    """
-    Call into real implementations if present. Fall back to a minimal stub
-    (so smokes keep generating artifacts without brittle dependencies).
-    """
-    # Attempt adapters first (explicit demo hooks)
-    try:
-        from . import adapters as _ad
-        if hasattr(_ad, "run_irr_demo") and mode == "irr":
-            res = _ad.run_irr_demo(params)  # type: ignore[arg-type]
-            # Expecting dict with basic metrics; normalize:
-            if isinstance(res, Mapping):
-                return ScenarioResult(
-                    name=params.get("name", "scenario"),
-                    results=dict(res),
-                    annual=res.get("annual") if isinstance(res.get("annual"), list) else None,  # type: ignore[index]
-                )
-    except Exception:
-        pass
-
-    # Try high level API (if available)
-    try:
-        from . import api as _api
-        if hasattr(_api, "run"):
-            res = _api.run(mode=mode, params=params)  # type: ignore[call-arg]
-            if isinstance(res, Mapping):
-                return ScenarioResult(
-                    name=params.get("name", "scenario"),
-                    results=dict(res),
-                    annual=res.get("annual") if isinstance(res.get("annual"), list) else None,  # type: ignore[index]
-                )
-    except Exception:
-        pass
-
-    # Minimal stub (keeps CI happy; does not pretend to be finance)
-    return ScenarioResult(
-        name=str(params.get("name", "scenario")),
-        results={
-            "equity_irr": 0.0,
-            "dscr_min": 1.0,
-            "note": "stub: real adapters/api not wired",
-        },
-        annual=[{"year": 1, "dscr": 1.0, "equity_cf": 0.0}],
-    )
+def _iter_yaml_files(conf: Path) -> Iterable[Tuple[str, Path]]:
+    """Yield (name, path) from a YAML file or a directory containing YAMLs."""
+    if conf.is_dir():
+        for p in sorted(conf.glob("*.y*ml")):
+            yield (p.stem, p)
+    else:
+        yield (conf.stem, conf)
 
 
-# --------------------------------------------------------------------------------------
-# File/dir runners and writers
-# --------------------------------------------------------------------------------------
-def _write_results(outdir: PathLike, base: str, sr: ScenarioResult, fmt: str = "csv", save_annual: bool = True) -> Tuple[Path, Optional[Path]]:
-    out = Path(outdir)
-    out.mkdir(parents=True, exist_ok=True)
+def _load_yaml(p: Path) -> Dict[str, Any]:
+    with p.open("r", encoding="utf-8") as fh:
+        data = yaml.safe_load(fh) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"Config {p} must be a mapping at top level.")
+    return data
 
-    ts = int(time.time())
-    res_path = out / f"scenario_{base}_results_{ts}.csv"
-    ann_path = out / f"scenario_{base}_annual_{ts}.csv"
 
-    # Results
-    with res_path.open("w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(["metric", "value"])
-        for k, v in sr.results.items():
-            w.writerow([k, v])
+def _dump_result_csv(dst: Path, rows: List[Dict[str, Any]]) -> None:
+    """Write simple CSV with keys from the first row (stable order)."""
+    if not rows:
+        dst.write_text("", encoding="utf-8")
+        return
+    headers = list(rows[0].keys())
+    lines = [",".join(headers)]
+    for r in rows:
+        line = ",".join(str(r.get(h, "")) for h in headers)
+        lines.append(line)
+    dst.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    # Annual (optional)
-    if save_annual and sr.annual:
-        keys: List[str] = sorted({k for row in sr.annual for k in row.keys()})
-        with ann_path.open("w", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=keys)
-            w.writeheader()
-            for row in sr.annual:
-                w.writerow(row)
+
+def _dump_result_jsonl(dst: Path, rows: List[Dict[str, Any]]) -> None:
+    with dst.open("w", encoding="utf-8") as fh:
+        for r in rows:
+            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+
+def _write_outputs(
+    outdir: Path,
+    base_name: str,
+    fmt: str,
+    summary: Dict[str, Any],
+    annual: List[Dict[str, Any]],
+) -> Tuple[Path | None, Path | None]:
+    """Write result files; return (summary_path, annual_path)."""
+    outdir.mkdir(parents=True, exist_ok=True)
+    suffix = {"csv": ".csv", "jsonl": ".jsonl"}[fmt]
+
+    # Summary one-liner
+    sum_path = outdir / f"{base_name}_results{suffix}"
+    if fmt == "csv":
+        _dump_result_csv(sum_path, [summary])
+    else:
+        _dump_result_jsonl(sum_path, [summary])
+
+    # Optional per-year
+    ann_path = outdir / f"{base_name}_annual{suffix}"
+    if annual:
+        if fmt == "csv":
+            _dump_result_csv(ann_path, annual)
+        else:
+            _dump_result_jsonl(ann_path, annual)
     else:
         ann_path = None
 
-    return res_path, ann_path
+    return sum_path, ann_path
 
 
-def run_scenario(params: Mapping[str, Any], *, mode: str = "irr") -> ScenarioResult:
+# ---------------------------
+# Public runner
+# ---------------------------
+
+def run_dir(
+    config: str | Path,
+    outputs_dir: Path,
+    *,
+    mode: str = "irr",
+    fmt: str = "csv",
+    save_annual: bool = False,
+) -> int:
     """
-    Run a single scenario dict. Validates (strict or permissive per env) then dispatches.
+    Execute a single YAML or all YAMLs in a directory.
+
+    Parameters
+    ----------
+    config : str|Path
+        Path to YAML (or directory of YAMLs). If empty string, falls back to CWD 'full_model_variables_updated.yaml'.
+    outputs_dir : Path
+        Where to write outputs (created if missing).
+    mode : str
+        Currently supports 'irr' (others may be wired separately).
+    fmt : str
+        'csv' or 'jsonl'.
+    save_annual : bool
+        If True, write per-year rows.
+
+    Returns
+    -------
+    int
+        0 on success, non-zero on error (strict mode may raise SystemExit earlier).
     """
-    _validate_params_dict(params, where=params.get("name"))
-    clean = _unwrap_parameters_block(params)
-    clean = _strip_ignored_keys(clean)
-    return _try_dispatch(mode=mode, params=clean)
+    if fmt not in ("csv", "jsonl"):
+        raise ValueError("fmt must be 'csv' or 'jsonl'")
+
+    if not config:
+        conf_path = Path("full_model_variables_updated.yaml").resolve()
+    else:
+        conf_path = Path(config).resolve()
+
+    outputs_dir = outputs_dir.resolve()
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+
+    if mode != "irr":
+        # Keep runner focused; other modes have their own drivers
+        raise NotImplementedError(f"Mode '{mode}' is not implemented in scenario_runner.run_dir")
+
+    results: List[RunResult] = []
+    for name, path in _iter_yaml_files(conf_path):
+        params = _load_yaml(path)
+
+        # Validate (env-aware inside validate_params)
+        # where=... is used only for error context
+        validate_params(params, where=name)
+
+        # Run model
+        summary = run_irr(params)
+        if not isinstance(summary, dict):
+            raise ValueError(f"run_irr returned non-mapping for {name}")
+
+        # Normalize outputs
+        ann = summary.get("annual") if isinstance(summary.get("annual"), list) else []
+        # Keep summary flat for CSV: remove heavy lists
+        flat_summary = {k: v for k, v in summary.items() if k != "annual"}
+        # Ensure a few canonical keys exist
+        flat_summary.setdefault("name", name)
+        flat_summary.setdefault("equity_irr", None)
+        flat_summary.setdefault("project_irr", None)
+        flat_summary.setdefault("npv_12", None)
+        flat_summary.setdefault("dscr_min", None)
+        flat_summary.setdefault("balloon_remaining", summary.get("balloon_remaining"))
+
+        # Write
+        base = f"scenario_{name}"
+        _write_outputs(outputs_dir, base, fmt, flat_summary, ann if save_annual else [])
+
+        results.append(RunResult(name=name, summary=flat_summary, annual=ann if save_annual else []))
+
+    # Print a tiny banner if a single run (keeps your CLI UX)
+    if len(results) == 1:
+        r = results[0].summary
+        print("\n--- IRR / NPV / DSCR RESULTS ---")
+        print(f"Equity IRR:  {float(r.get('equity_irr') or 0.0)*100:5.2f} %")
+        print(f"Project IRR: {float(r.get('project_irr') or 0.0)*100:5.2f} %")
+        # NPV placeholder or computed upstream
+        npv_val = r.get("npv_12")
+        try:
+            npv_str = f"{float(npv_val):.2f} Million"
+        except Exception:
+            npv_str = str(npv_val)
+        print(f"NPV @ 12%:   {npv_str}")
+
+    return 0
 
 
-def run_file(scenario_file: PathLike, *, mode: str = "irr") -> Iterator[Tuple[str, ScenarioResult]]:
-    """
-    Load a scenario file and yield (base_name, result) pairs.
-      - plain dict → one result
-      - list of dicts → each treated as a scenario
-      - matrix forms:
-          {"matrix": [ {...}, {...} ]} or {"parameters": {...}} (flatten one layer)
-    """
-    payload = _load_yaml(scenario_file)
-    base = Path(scenario_file).stem
+__all__ = ["run_dir"]
 
-    # list of params
-    if isinstance(payload, list):
-        for i, p in enumerate(payload, 1):
-            if isinstance(p, Mapping):
-                yield f"{base}_{i}", run_scenario(p, mode=mode)
-        return
-
-    # matrix-like
-    if isinstance(payload, Mapping):
-        if "matrix" in payload and isinstance(payload["matrix"], list):
-            for i, p in enumerate(payload["matrix"], 1):
-                if isinstance(p, Mapping):
-                    yield f"{base}_{i}", run_scenario(p, mode=mode)
-            return
-
-        # single dict
-        yield base, run_scenario(payload, mode=mode)
-        return
-
-    # Fallback: ignore unknown
-    return
-
-
-def run_dir(scenarios_dir: PathLike,
-            outputs_dir: PathLike,
-            *,
-            mode: str = "irr",
-            fmt: str = "csv",
-            save_annual: bool = True) -> List[Tuple[Path, Optional[Path]]]:
-    """
-    Run all .yaml/.yml/.json files in a directory. Returns list of (results_path, annual_path).
-    """
-    out_paths: List[Tuple[Path, Optional[Path]]] = []
-    for f in _iter_yaml_files(scenarios_dir):
-        for base, result in run_file(f, mode=mode):
-            res_p, ann_p = _write_results(outputs_dir, base, result, fmt=fmt, save_annual=save_annual)
-            out_paths.append((res_p, ann_p))
-    return out_paths

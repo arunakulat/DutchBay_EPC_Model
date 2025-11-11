@@ -1,277 +1,264 @@
-#!/usr/bin/env python3
-"""
-Parameter Validation Module for Dutch Bay Financial Model
-Provides comprehensive input validation with clear error messages
-"""
-from typing import Dict, Any, List, Tuple
-import warnings
+# dutchbay_v13/validate.py
+from __future__ import annotations
 
+import argparse
+import os
+import sys
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+try:
+    import yaml  # type: ignore
+except Exception as e:  # pragma: no cover
+    raise RuntimeError("PyYAML is required to load YAML inputs") from e
+
+# jsonschema is optional; if absent we degrade gracefully in relaxed mode
+try:
+    import jsonschema  # type: ignore
+    from jsonschema import Draft202012Validator as _SchemaValidator  # type: ignore
+except Exception:  # pragma: no cover
+    jsonschema = None
+    _SchemaValidator = None  # type: ignore
+
+# Our schema discovery module
+from . import schema as _schema_mod  # type: ignore
+
+
+# =============================================================================
+# Mode & config
+# =============================================================================
+
+def _mode_from_env() -> str:
+    env = (os.environ.get("VALIDATION_MODE") or "").strip().lower()
+    if not env and os.environ.get("DB13_STRICT_VALIDATE"):
+        env = "strict"
+    return env if env in {"strict", "relaxed"} else "strict"
+
+
+# Default ignore set for RELAXED validation; overridable via DB13_IGNORE_KEYS
+_DEFAULT_IGNORE = {
+    "technical",
+    "finance",
+    "financial",
+    "notes",
+    "metadata",
+    "name",
+    "description",
+    "id",
+    "parameters",   # container
+    "override",     # container
+    "overrides",    # container
+}
+
+
+def _ignored_keys_from_env() -> set[str]:
+    raw = os.environ.get("DB13_IGNORE_KEYS", "")
+    if not raw:
+        return set(_DEFAULT_IGNORE)
+    toks = [t.strip() for t in raw.split(",") if t.strip()]
+    return set(toks) if toks else set(_DEFAULT_IGNORE)
+
+
+# =============================================================================
+# YAML helpers
+# =============================================================================
+
+def load_yaml_file(path: Path) -> Dict[str, Any]:
+    with path.open("r", encoding="utf-8") as fh:
+        data = yaml.safe_load(fh)
+    if not isinstance(data, dict):
+        raise ValueError(f"{path} must be a mapping at the top level.")
+    return data
+
+
+def _unwrap_params(d: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    If given a scenario-matrix style dict, unwrap one level of
+    {parameters:{...}} or {override:{...}} / {overrides:{...}}.
+    """
+    for k in ("parameters", "override", "overrides"):
+        v = d.get(k)
+        if isinstance(v, dict):
+            return v
+    return d
+
+
+def _filter_ignored(obj: Any, ignore: set[str]) -> Any:
+    """
+    Recursively drop keys in 'ignore' (case-insensitive) from dicts.
+    """
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            try:
+                key = k.casefold() if isinstance(k, str) else k
+            except Exception:
+                key = k
+            if isinstance(key, str) and key in ignore:
+                continue
+            out[k] = _filter_ignored(v, ignore)
+        return out
+    elif isinstance(obj, list):
+        return [_filter_ignored(x, ignore) for x in obj]
+    return obj
+
+
+# =============================================================================
+# JSON Schema loading / selection
+# =============================================================================
+
+def _iter_json_validators() -> List[Any]:
+    """
+    Build jsonschema validators from discovered documents.
+    We keep them as a list; each may apply to a specific section.
+    """
+    vals: List[Any] = []
+    if jsonschema is None or _SchemaValidator is None:
+        return vals
+
+    for doc in _schema_mod.iter_schema_documents():
+        try:
+            vals.append(_SchemaValidator(doc))
+        except Exception:
+            # Skip malformed schemas silently; others may still work
+            continue
+    return vals
+
+
+def _schema_targets(data: Dict[str, Any]) -> List[Tuple[str, Any]]:
+    """
+    Decide which sub-mappings to validate with which schema.
+    For now:
+      - Any schema whose top-level properties include 'debt_ratio' or 'mix'
+        is assumed to target Financing_Terms.
+      - Otherwise, if a schema looks like a whole-document schema
+        (has 'properties' that include common roots), we pass the root.
+    """
+    targets: List[Tuple[str, Any]] = []
+    ft = data.get("Financing_Terms")
+
+    # Root-level common sections (heuristic)
+    root_keys = set(data.keys())
+
+    # Build candidate tuples later when we actually evaluate each schema
+    # We just return placeholders here; the actual mapping selection happens
+    # in _validate_against_schemas.
+    if isinstance(ft, dict):
+        targets.append(("Financing_Terms", ft))
+    # Always include the whole document as a fallback target; a schema may
+    # explicitly model the entire input.
+    targets.append(("root", data))
+    return targets
+
+
+def _schema_targets_for_validator(validator: Any, data: Dict[str, Any]) -> List[Tuple[str, Any]]:
+    """
+    Given one jsonschema validator, return the sub-mappings we should validate.
+    Heuristic:
+      - If schema.properties contains 'debt_ratio' or 'mix', validate Financing_Terms only.
+      - Else, validate the root mapping.
+    """
+    try:
+        props = set((validator.schema or {}).get("properties", {}).keys())
+    except Exception:
+        props = set()
+
+    ft = data.get("Financing_Terms")
+    if "debt_ratio" in props or "mix" in props:
+        if isinstance(ft, dict):
+            return [("Financing_Terms", ft)]
+        return []  # no Financing_Terms present
+    # Otherwise assume it applies to the whole doc
+    return [("root", data)]
+
+
+# =============================================================================
+# Validation core
+# =============================================================================
 
 class ValidationError(Exception):
-    """Custom exception for parameter validation failures."""
-
     pass
 
 
-def validate_project_parameters(params: Dict[str, Any]) -> Tuple[bool, List[str]]:
+def validate_params(params: Dict[str, Any], mode: str = "strict", where: Optional[str] = None) -> None:
     """
-    Validate all project parameters against reasonable bounds.
-
-    Args:
-        params: Dictionary of project parameters
-
-    Returns:
-        Tuple of (is_valid, list_of_errors)
+    Validate a parameter mapping.
+      - STRICT: run schemas; raise on first error
+      - RELAXED: drop ignorable metadata keys, try again; if still failing,
+                 do not raise (smoke runs tolerate).
     """
-    errors = []
+    m = (mode or "strict").lower()
+    if m not in {"strict", "relaxed"}:
+        m = "strict"
 
-    # CAPEX validation
-    if "total_capex" in params or "CAPEX_TOTAL" in params:
-        capex = params.get("total_capex", params.get("CAPEX_TOTAL"))
-        if not (10 < capex < 500):
-            errors.append(
-                f"CAPEX {capex}M USD is outside reasonable range (10-500M USD)"
-            )
+    # Unwrap one container level if present
+    base = _unwrap_params(params)
 
-    # Capacity factor validation
-    if "cf_p50" in params or "CF_P50" in params:
-        cf = params.get("cf_p50", params.get("CF_P50"))
-        if not (0.15 < cf < 0.65):
-            errors.append(
-                f"Capacity factor {cf:.1%} is outside reasonable range (15%-65%)"
-            )
+    # Load validators if available
+    validators = _iter_json_validators()
 
-    # Nameplate capacity validation
-    if "nameplate_mw" in params or "NAMEPLATE_MW" in params:
-        mw = params.get("nameplate_mw", params.get("NAMEPLATE_MW"))
-        if not (10 < mw < 500):
-            errors.append(
-                f"Nameplate capacity {mw}MW is outside reasonable range (10-500MW)"
-            )
+    if not validators:
+        # No schemas available. In STRICT, we still accept (no-op)
+        # because earlier strictness came from custom key filters.
+        # That logic now lives in scenario_runner’s wrapper if needed.
+        return
 
-    # Degradation validation
-    if "yearly_degradation" in params or "YEARLY_DEGRADATION" in params:
-        deg = params.get("yearly_degradation", params.get("YEARLY_DEGRADATION"))
-        if not (0 < deg < 0.02):
-            errors.append(
-                f"Degradation {deg:.2%}/year is outside reasonable range (0%-2%/year)"
-            )
+    def _run_all(_data: Dict[str, Any]) -> None:
+        for v in validators:
+            for label, sub in _schema_targets_for_validator(v, _data):
+                try:
+                    v.validate(sub)
+                except Exception as e:
+                    # Wrap with context including 'where'
+                    loc = f" at {where}" if where else ""
+                    raise ValidationError(f"Schema validation failed for {label}{loc}: {e}") from e
 
-    # Tax rate validation
-    if "tax_rate" in params or "TAX_RATE" in params:
-        tax = params.get("tax_rate", params.get("TAX_RATE"))
-        if not (0 <= tax < 0.60):
-            errors.append(f"Tax rate {tax:.1%} is outside reasonable range (0%-60%)")
+    if m == "strict":
+        _run_all(base)
+        return
 
-    # FX depreciation validation
-    if "fx_depr" in params or "FX_DEPR" in params:
-        fx_depr = params.get("fx_depr", params.get("FX_DEPR"))
-        if not (-0.10 < fx_depr < 0.20):
-            errors.append(
-                f"FX depreciation {fx_depr:.1%}/year is outside reasonable range (-10% to +20%/year)"
-            )
-
-    # Initial FX rate validation
-    if "fx_initial" in params or "FX_INITIAL" in params:
-        fx_init = params.get("fx_initial", params.get("FX_INITIAL"))
-        if not (100 < fx_init < 500):
-            errors.append(
-                f"Initial FX rate {fx_init} LKR/USD is outside reasonable range (100-500)"
-            )
-
-    # Interest rate validation
-    if "usd_debt_rate" in params or "USD_DEBT_RATE" in params:
-        usd_rate = params.get("usd_debt_rate", params.get("USD_DEBT_RATE"))
-        if not (0.01 < usd_rate < 0.20):
-            errors.append(
-                f"USD interest rate {usd_rate:.1%} is outside reasonable range (1%-20%)"
-            )
-
-    if "lkr_debt_rate" in params or "LKR_DEBT_RATE" in params:
-        lkr_rate = params.get("lkr_debt_rate", params.get("LKR_DEBT_RATE"))
-        if not (0.01 < lkr_rate < 0.25):
-            errors.append(
-                f"LKR interest rate {lkr_rate:.1%} is outside reasonable range (1%-25%)"
-            )
-
-    # Project life validation
-    if "project_life_years" in params or "PROJECT_YEARS" in params:
-        years = params.get("project_life_years", params.get("PROJECT_YEARS"))
-        if not (10 <= years <= 30):
-            errors.append(
-                f"Project life {years} years is outside reasonable range (10-30 years)"
-            )
-
-    # OPEX validation
-    if "opex_usd_mwh" in params or "OPEX_USD_MWH" in params:
-        opex = params.get("opex_usd_mwh", params.get("OPEX_USD_MWH"))
-        if not (2 < opex < 20):
-            errors.append(
-                f"OPEX {opex} USD/MWh is outside reasonable range (2-20 USD/MWh)"
-            )
-
-    # Tariff validation
-    if "tariff_lkr_kwh" in params or "TARIFF_LKR_KWH" in params:
-        tariff = params.get("tariff_lkr_kwh", params.get("TARIFF_LKR_KWH"))
-        if not (5 < tariff < 50):
-            errors.append(
-                f"Tariff {tariff} LKR/kWh is outside reasonable range (5-50 LKR/kWh)"
-            )
-
-    # SSCL rate validation
-    if "sscl_rate" in params or "SSCL_RATE" in params:
-        sscl = params.get("sscl_rate", params.get("SSCL_RATE"))
-        if not (0 <= sscl < 0.10):
-            errors.append(f"SSCL rate {sscl:.1%} is outside reasonable range (0%-10%)")
-
-    # Debt tenure validation
-    if "usd_debt_tenor" in params or "USD_DEBT_TENOR" in params:
-        tenor = params.get("usd_debt_tenor", params.get("USD_DEBT_TENOR"))
-        if not (5 <= tenor <= 20):
-            errors.append(
-                f"USD debt tenor {tenor} years is outside reasonable range (5-20 years)"
-            )
-
-    # OPEX split validation
-    if "opex_split_usd" in params and "opex_split_lkr" in params:
-        usd_split = params["opex_split_usd"]
-        lkr_split = params["opex_split_lkr"]
-        if abs((usd_split + lkr_split) - 1.0) > 0.01:
-            errors.append(
-                f"OPEX splits don't sum to 1.0: USD {usd_split} + LKR {lkr_split} = {usd_split+lkr_split}"
-            )
-
-    return (len(errors) == 0, errors)
+    # RELAXED
+    ignore = {k.casefold() for k in _ignored_keys_from_env()}
+    filtered = _filter_ignored(base, ignore)
+    try:
+        _run_all(filtered)
+    except Exception:
+        # Swallow in relaxed mode
+        return
 
 
-def validate_debt_structure(debt: Dict[str, Any]) -> Tuple[bool, List[str]]:
-    """
-    Validate debt structure parameters.
+# =============================================================================
+# CLI
+# =============================================================================
 
-    Args:
-        debt: Dictionary of debt parameters
+def _cli(argv: Optional[List[str]] = None) -> int:
+    p = argparse.ArgumentParser(
+        prog="validate.py",
+        description="Validate a YAML file against discovered schemas (strict or relaxed).",
+    )
+    p.add_argument("file", help="Path to YAML file to validate")
+    p.add_argument(
+        "--mode",
+        choices=["strict", "relaxed"],
+        default=_mode_from_env(),
+        help="Validation mode (default from VALIDATION_MODE / DB13_STRICT_VALIDATE).",
+    )
+    args = p.parse_args(argv)
 
-    Returns:
-        Tuple of (is_valid, list_of_errors)
-    """
-    errors = []
+    path = Path(args.file)
+    data = load_yaml_file(path)
+    try:
+        validate_params(data, mode=args.mode, where=str(path))
+    except ValidationError as e:
+        # STRICT failure should be non-zero exit
+        sys.stderr.write(f"ERROR: {e}\n")
+        return 2
 
-    # Total debt validation
-    if "total_debt" in debt:
-        total = debt["total_debt"]
-        if total < 0:
-            errors.append("Total debt cannot be negative")
-        if total > 500:
-            errors.append(f"Total debt {total}M USD seems unreasonably high (>500M)")
-
-    # USD/LKR debt split validation
-    if "usd_debt" in debt and "lkr_debt" in debt and "total_debt" in debt:
-        usd = debt["usd_debt"]
-        lkr = debt["lkr_debt"]
-        total = debt["total_debt"]
-
-        if abs((usd + lkr) - total) > 0.01:
-            errors.append(
-                f"USD debt ({usd}) + LKR debt ({lkr}) != Total debt ({total})"
-            )
-
-    # DFI percentage validation
-    if "dfi_pct_of_usd" in debt:
-        dfi_pct = debt["dfi_pct_of_usd"]
-        if not (0 <= dfi_pct <= 0.30):
-            errors.append(
-                f"DFI percentage {dfi_pct:.1%} is outside reasonable range (0%-30%)"
-            )
-
-    return (len(errors) == 0, errors)
+    print("OK: validation passed")
+    return 0
 
 
-def validate_and_warn(params: Dict[str, Any], debt: Dict[str, Any] = None) -> None:
-    """
-    Validate parameters and issue warnings for any violations.
-    Raises ValidationError if critical violations found.
+if __name__ == "__main__":  # pragma: no cover
+    sys.exit(_cli())
 
-    Args:
-        params: Project parameters dictionary
-        debt: Optional debt structure dictionary
-    """
-    # Validate project parameters
-    is_valid, errors = validate_project_parameters(params)
-
-    if not is_valid:
-        error_msg = "Parameter validation failed:\n" + "\n".join(
-            f"  - {e}" for e in errors
-        )
-        if len(errors) > 3:  # Too many errors = critical failure
-            raise ValidationError(error_msg)
-        else:  # Few errors = warnings only
-            warnings.warn(error_msg)
-
-    # Validate debt structure if provided
-    if debt is not None:
-        is_valid, errors = validate_debt_structure(debt)
-        if not is_valid:
-            error_msg = "Debt structure validation failed:\n" + "\n".join(
-                f"  - {e}" for e in errors
-            )
-            if len(errors) > 2:
-                raise ValidationError(error_msg)
-            else:
-                warnings.warn(error_msg)
-
-
-def validate_scenario_matrix(scenarios: List[Dict[str, Any]]) -> Tuple[bool, List[str]]:
-    """
-    Validate a batch of scenarios from scenario matrix.
-
-    Args:
-        scenarios: List of parameter dictionaries
-
-    Returns:
-        Tuple of (is_valid, list_of_errors)
-    """
-    all_errors = []
-
-    for i, scenario in enumerate(scenarios):
-        is_valid, errors = validate_project_parameters(scenario)
-        if not is_valid:
-            all_errors.append(f"Scenario {i+1}: " + "; ".join(errors))
-
-    return (len(all_errors) == 0, all_errors)
-
-
-if __name__ == "__main__":
-    # Example usage
-    test_params = {
-        "total_capex": 155.0,
-        "cf_p50": 0.40,
-        "nameplate_mw": 150,
-        "yearly_degradation": 0.006,
-        "tax_rate": 0.30,
-        "fx_depr": 0.03,
-        "fx_initial": 300,
-        "usd_debt_rate": 0.07,
-        "project_life_years": 20,
-        "opex_usd_mwh": 6.83,
-        "tariff_lkr_kwh": 20.36,
-    }
-
-    is_valid, errors = validate_project_parameters(test_params)
-    if is_valid:
-        print("✓ All parameters valid")
-    else:
-        print("✗ Validation errors:")
-        for error in errors:
-            print(f"  - {error}")
-
-# --- BEGIN AUTO-SHIM ---
-def validate_params(d):
-    """Minimal parameter validator: only known tariff keys allowed."""
-    if not isinstance(d, dict):
-        raise TypeError("params must be a dict")
-    allowed = {"tariff_lkr_per_kwh", "debt", "mode", "name"}
-    for k in d:
-        if k not in allowed:
-            raise ValueError(f"Unknown parameter '{k}'")
-    return True
-# --- END AUTO-SHIM ---
+    

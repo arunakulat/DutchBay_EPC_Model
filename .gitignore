@@ -65,3 +65,5 @@ _out/
 scenario_*_results_*.jsonl
 scenario_*_results_*.csv
 scenario_*_annual_*.csv
+.venv311/
+venv/
