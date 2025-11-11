@@ -1,97 +1,93 @@
-# dutchbay_v13/cli.py
 from __future__ import annotations
 
 import argparse
 import os
-import sys
 from pathlib import Path
+from typing import Optional
 
-# Only imports the thin runner; heavy math stays behind scenario_runner
-from .scenario_runner import run_dir  # run_dir(Path|str, Path, mode="irr", fmt="csv", save_annual=False)
+from .scenario_runner import run_dir  # run_dir(config, out_dir, mode="irr", fmt="csv", save_annual=False)
 
 
-def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="dutchbay_v13",
-        description="Dutch Bay EPC high-level financial model CLI",
+        description="DutchBay EPC financial runner (IRR/NPV/DSCR).",
     )
     p.add_argument(
         "--mode",
+        choices=["irr"],
         default="irr",
-        choices=["irr", "sensitivity", "montecarlo", "optimize"],
-        help="Execution mode (default: irr).",
+        help="Execution mode. Only 'irr' is supported currently.",
     )
     p.add_argument(
         "--config",
-        required=False,
-        default=None,
-        help="Path to a single YAML, or a directory of scenarios/overrides. If omitted, defaults to package demos.",
+        required=True,
+        type=str,
+        help="Path to YAML scenario (e.g., full_model_variables_updated.yaml).",
     )
     p.add_argument(
         "--outputs-dir",
         default="outputs",
-        help="Directory to write result files (default: outputs). Will be created if missing.",
+        type=str,
+        help="Directory for artifacts (CSV, etc.). Will be created if missing.",
     )
     p.add_argument(
         "--format",
-        dest="fmt",
+        dest="format",
+        choices=["csv"],
         default="csv",
-        choices=["csv", "jsonl"],
-        help="Output format for summary/result files (default: csv).",
+        help="Output format for annual export.",
     )
     p.add_argument(
         "--save-annual",
         action="store_true",
-        help="If set, write per-year (annual) rows alongside summary results.",
+        help="If set, write annual rows to outputs-dir in the chosen format.",
     )
-    v = p.add_mutually_exclusive_group()
-    v.add_argument(
+
+    # Validation mode toggles (env-aware in scenario_runner -> validate)
+    vm = p.add_mutually_exclusive_group()
+    vm.add_argument(
         "--strict",
         action="store_true",
-        help="Enable strict validation (unknown keys raise).",
+        help="Force STRICT validation (VALIDATION_MODE=strict).",
     )
-    v.add_argument(
+    vm.add_argument(
         "--relaxed",
         action="store_true",
-        help="Enable relaxed validation (unknown keys ignored if harmless).",
+        help="Force RELAXED validation (VALIDATION_MODE=relaxed).",
     )
-    return p.parse_args(argv)
+
+    return p
 
 
-def _apply_validation_mode(ns: argparse.Namespace) -> None:
-    # Default: leave env as-is; flags override explicitly.
-    if ns.strict:
+def main(argv: Optional[list[str]] = None) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    # Wire validation mode via env for validate.load_params() path.
+    if args.strict:
         os.environ["VALIDATION_MODE"] = "strict"
-    elif ns.relaxed:
+    elif args.relaxed:
         os.environ["VALIDATION_MODE"] = "relaxed"
-    # else: respect existing environment
+
+    # Ensure outputs dir exists (run_dir also mkdirs; doing it here helps early failures).
+    out_dir = Path(args.outputs_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Execute
+    res = run_dir(
+        config=Path(args.config),
+        out_dir=out_dir,
+        mode=args.mode,
+        fmt=args.format,
+        save_annual=bool(args.save_annual),
+    )
+
+    # Simple success signal; richer exit semantics can be added later.
+    return 0 if isinstance(res, dict) else 2
 
 
-def main(argv: list[str] | None = None) -> int:
-    ns = _parse_args(argv)
-    _apply_validation_mode(ns)
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())
 
-    # Resolve paths
-    outputs_dir = Path(ns.outputs_dir).resolve()
-    cfg_path: Path | None = Path(ns.config).resolve() if ns.config else None
-
-    # Ensure outputs directory exists
-    outputs_dir.mkdir(parents=True, exist_ok=True)
-
-    # Delegate to the scenario runner. It accepts either a YAML file or a directory.
-    try:
-        rc = run_dir(cfg_path or "", outputs_dir, mode=ns.mode, fmt=ns.fmt, save_annual=ns.save_annual)
-    except SystemExit as e:
-        # Propagate strict-validation exit codes cleanly through CLI
-        return int(e.code) if isinstance(e.code, int) else 2
-    except Exception as e:
-        # Fail noisily with non-zero; keep traceback for debugging
-        print(f"ERROR: {e}", file=sys.stderr)
-        return 1
-
-    # run_dir may return None or an int; normalize to shell-friendly code
-    return int(rc) if isinstance(rc, int) else 0
-
-
-__all__ = ["main"]
-
+    

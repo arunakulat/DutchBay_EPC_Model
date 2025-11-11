@@ -1,4 +1,4 @@
-from dutchbay_v13.types import DebtTerms
+from dutchbay_v13.db_types import DebtTerms
 from dutchbay_v13.finance.debt import amortization_schedule, blended_rate
 
 

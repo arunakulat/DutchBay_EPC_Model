@@ -3,262 +3,227 @@ from __future__ import annotations
 
 import argparse
 import os
-import sys
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Union
+
+Pathish = Union[str, Path]
 
 try:
     import yaml  # type: ignore
-except Exception as e:  # pragma: no cover
-    raise RuntimeError("PyYAML is required to load YAML inputs") from e
-
-# jsonschema is optional; if absent we degrade gracefully in relaxed mode
-try:
-    import jsonschema  # type: ignore
-    from jsonschema import Draft202012Validator as _SchemaValidator  # type: ignore
 except Exception:  # pragma: no cover
-    jsonschema = None
-    _SchemaValidator = None  # type: ignore
+    yaml = None  # type: ignore
 
-# Our schema discovery module
-from . import schema as _schema_mod  # type: ignore
-
-
-# =============================================================================
-# Mode & config
-# =============================================================================
-
-def _mode_from_env() -> str:
-    env = (os.environ.get("VALIDATION_MODE") or "").strip().lower()
-    if not env and os.environ.get("DB13_STRICT_VALIDATE"):
-        env = "strict"
-    return env if env in {"strict", "relaxed"} else "strict"
+# Try optional jsonschema if present; otherwise we do a lightweight structural check.
+try:  # pragma: no cover
+    import jsonschema  # type: ignore
+except Exception:  # pragma: no cover
+    jsonschema = None  # type: ignore
 
 
-# Default ignore set for RELAXED validation; overridable via DB13_IGNORE_KEYS
-_DEFAULT_IGNORE = {
-    "technical",
-    "finance",
-    "financial",
-    "notes",
-    "metadata",
-    "name",
-    "description",
-    "id",
-    "parameters",   # container
-    "override",     # container
-    "overrides",    # container
-}
+# ---------------------------
+# Schema discovery (optional)
+# ---------------------------
 
-
-def _ignored_keys_from_env() -> set[str]:
-    raw = os.environ.get("DB13_IGNORE_KEYS", "")
-    if not raw:
-        return set(_DEFAULT_IGNORE)
-    toks = [t.strip() for t in raw.split(",") if t.strip()]
-    return set(toks) if toks else set(_DEFAULT_IGNORE)
-
-
-# =============================================================================
-# YAML helpers
-# =============================================================================
-
-def load_yaml_file(path: Path) -> Dict[str, Any]:
-    with path.open("r", encoding="utf-8") as fh:
-        data = yaml.safe_load(fh)
-    if not isinstance(data, dict):
-        raise ValueError(f"{path} must be a mapping at the top level.")
-    return data
-
-
-def _unwrap_params(d: Dict[str, Any]) -> Dict[str, Any]:
+def _schema_paths() -> List[Path]:
     """
-    If given a scenario-matrix style dict, unwrap one level of
-    {parameters:{...}} or {override:{...}} / {overrides:{...}}.
+    Where to look for YAML schemas. We use:
+      - package default: dutchbay_v13/inputs/schema
+      - any extra paths hinted by dutchbay_v13.schema.EXTRA_SCHEMA_PATHS (if present)
+      - env var EXTRA_SCHEMA_PATHS (colon-separated)
     """
-    for k in ("parameters", "override", "overrides"):
-        v = d.get(k)
-        if isinstance(v, dict):
-            return v
+    paths: List[Path] = []
+    pkg_root = Path(__file__).resolve().parent
+    default = pkg_root / "inputs" / "schema"
+    if default.exists():
+        paths.append(default)
+
+    # optional code-level hint
+    try:
+        from . import schema as _schema_mod  # type: ignore
+        extra = getattr(_schema_mod, "EXTRA_SCHEMA_PATHS", [])
+        for p in extra or []:
+            pp = Path(p).expanduser().resolve()
+            if pp.exists():
+                paths.append(pp)
+    except Exception:
+        pass
+
+    # optional env override
+    env = os.environ.get("EXTRA_SCHEMA_PATHS")
+    if env:
+        for p in env.split(":"):
+            pp = Path(p).expanduser().resolve()
+            if pp.exists():
+                paths.append(pp)
+
+    # De-dup while preserving order
+    seen: set = set()
+    uniq: List[Path] = []
+    for p in paths:
+        if str(p) not in seen:
+            seen.add(str(p))
+            uniq.append(p)
+    return uniq
+
+
+def _load_yaml_file(path: Pathish) -> Dict[str, Any]:
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"YAML not found: {p}")
+    if yaml is None:
+        raise RuntimeError("PyYAML is not available in this environment.")
+    with p.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+        if not isinstance(data, dict):
+            raise TypeError(f"Top-level YAML must be a mapping, got {type(data).__name__}")
+        return data
+
+
+def _load_financing_schema() -> Optional[Dict[str, Any]]:
+    """
+    Best-effort: load financing_terms.schema.yaml if found in any schema path.
+    """
+    names = {"financing_terms.schema.yaml", "Financing_Terms.schema.yaml"}
+    for base in _schema_paths():
+        for name in names:
+            cand = base / name
+            if cand.exists():
+                try:
+                    return _load_yaml_file(cand)
+                except Exception:
+                    # ignore corrupted schema; fall back to lightweight check
+                    return None
+    return None
+
+
+# ------------------------------------
+# Public API used by scenario_runner
+# ------------------------------------
+
+def load_params_from_file(path: Pathish) -> Dict[str, Any]:
+    """
+    Load a config YAML (e.g., full_model_variables_updated.yaml) into a dict.
+    """
+    return _load_yaml_file(path)
+
+
+def _lightweight_financing_check(d: Dict[str, Any], strict: bool) -> None:
+    """
+    Minimal structural guardrails when jsonschema is unavailable.
+    Only enforces obvious typos and nesting under Financing_Terms.
+    """
+    ft = d.get("Financing_Terms")
+    if ft is None:
+        return
+    if not isinstance(ft, dict):
+        raise TypeError("Financing_Terms must be a mapping.")
+
+    allowed_top = {
+        "debt_ratio",
+        "tenor_years",
+        "interest_only_years",
+        "amortization",
+        "dscr_target",
+        "min_dscr",
+        "mix",
+        "rates",
+        "reserves",
+        "fees",
+        "dscr_haircut_factor",
+    }
+    allowed_mix = {"lkr_max", "dfi_max", "usd_commercial_min"}
+    allowed_rates = {"lkr_floor", "usd_floor", "dfi_floor"}
+    allowed_reserves = {"dsra_months", "receivables_guarantee_months"}
+    allowed_fees = {"upfront_pct", "commitment_pct"}
+
+    if strict:
+        unknown = set(ft.keys()) - allowed_top
+        if unknown:
+            raise ValueError(f"Unknown Financing_Terms keys (strict): {sorted(unknown)}")
+
+    mix = ft.get("mix")
+    if mix is not None:
+        if not isinstance(mix, dict):
+            raise TypeError("Financing_Terms.mix must be a mapping.")
+        if strict:
+            unk = set(mix.keys()) - allowed_mix
+            if unk:
+                raise ValueError(f"Unknown Financing_Terms.mix keys (strict): {sorted(unk)}")
+
+    rates = ft.get("rates")
+    if rates is not None:
+        if not isinstance(rates, dict):
+            raise TypeError("Financing_Terms.rates must be a mapping.")
+        if strict:
+            unk = set(rates.keys()) - allowed_rates
+            if unk:
+                raise ValueError(f"Unknown Financing_Terms.rates keys (strict): {sorted(unk)}")
+
+    reserves = ft.get("reserves")
+    if reserves is not None:
+        if not isinstance(reserves, dict):
+            raise TypeError("Financing_Terms.reserves must be a mapping.")
+        if strict:
+            unk = set(reserves.keys()) - allowed_reserves
+            if unk:
+                raise ValueError(f"Unknown Financing_Terms.reserves keys (strict): {sorted(unk)}")
+
+    fees = ft.get("fees")
+    if fees is not None:
+        if not isinstance(fees, dict):
+            raise TypeError("Financing_Terms.fees must be a mapping.")
+        if strict:
+            unk = set(fees.keys()) - allowed_fees
+            if unk:
+                raise ValueError(f"Unknown Financing_Terms.fees keys (strict): {sorted(unk)}")
+
+
+def validate_params_dict(d: Dict[str, Any], mode: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Validate a params dict. STRICT raises on unknown/invalid keys.
+    RELAXED tolerates harmless extras.
+    If jsonschema is present and a schema is found, we validate with it; otherwise we do a lightweight check.
+    """
+    vm = (mode or os.environ.get("VALIDATION_MODE") or "relaxed").strip().lower()
+    strict = vm == "strict"
+
+    schema = _load_financing_schema() if jsonschema is not None else None
+    if schema and jsonschema is not None:
+        try:
+            jsonschema.validate(instance=d, schema=schema)  # type: ignore
+        except Exception as e:
+            if not strict:
+                # In relaxed mode, only re-raise structural errors; unknown fields are allowed.
+                raise
+            raise
+    else:
+        _lightweight_financing_check(d, strict=strict)
+
     return d
 
 
-def _filter_ignored(obj: Any, ignore: set[str]) -> Any:
-    """
-    Recursively drop keys in 'ignore' (case-insensitive) from dicts.
-    """
-    if isinstance(obj, dict):
-        out = {}
-        for k, v in obj.items():
-            try:
-                key = k.casefold() if isinstance(k, str) else k
-            except Exception:
-                key = k
-            if isinstance(key, str) and key in ignore:
-                continue
-            out[k] = _filter_ignored(v, ignore)
-        return out
-    elif isinstance(obj, list):
-        return [_filter_ignored(x, ignore) for x in obj]
-    return obj
+# -----------------------
+# CLI entry for `-m`
+# -----------------------
 
+def _cli() -> int:
+    ap = argparse.ArgumentParser(description="Validate a DutchBay YAML config.")
+    ap.add_argument("file", help="Path to YAML file.")
+    ap.add_argument("--mode", choices=["strict", "relaxed"], default=None,
+                    help="Override validation mode (default: env VALIDATION_MODE or relaxed).")
+    args = ap.parse_args()
 
-# =============================================================================
-# JSON Schema loading / selection
-# =============================================================================
-
-def _iter_json_validators() -> List[Any]:
-    """
-    Build jsonschema validators from discovered documents.
-    We keep them as a list; each may apply to a specific section.
-    """
-    vals: List[Any] = []
-    if jsonschema is None or _SchemaValidator is None:
-        return vals
-
-    for doc in _schema_mod.iter_schema_documents():
-        try:
-            vals.append(_SchemaValidator(doc))
-        except Exception:
-            # Skip malformed schemas silently; others may still work
-            continue
-    return vals
-
-
-def _schema_targets(data: Dict[str, Any]) -> List[Tuple[str, Any]]:
-    """
-    Decide which sub-mappings to validate with which schema.
-    For now:
-      - Any schema whose top-level properties include 'debt_ratio' or 'mix'
-        is assumed to target Financing_Terms.
-      - Otherwise, if a schema looks like a whole-document schema
-        (has 'properties' that include common roots), we pass the root.
-    """
-    targets: List[Tuple[str, Any]] = []
-    ft = data.get("Financing_Terms")
-
-    # Root-level common sections (heuristic)
-    root_keys = set(data.keys())
-
-    # Build candidate tuples later when we actually evaluate each schema
-    # We just return placeholders here; the actual mapping selection happens
-    # in _validate_against_schemas.
-    if isinstance(ft, dict):
-        targets.append(("Financing_Terms", ft))
-    # Always include the whole document as a fallback target; a schema may
-    # explicitly model the entire input.
-    targets.append(("root", data))
-    return targets
-
-
-def _schema_targets_for_validator(validator: Any, data: Dict[str, Any]) -> List[Tuple[str, Any]]:
-    """
-    Given one jsonschema validator, return the sub-mappings we should validate.
-    Heuristic:
-      - If schema.properties contains 'debt_ratio' or 'mix', validate Financing_Terms only.
-      - Else, validate the root mapping.
-    """
     try:
-        props = set((validator.schema or {}).get("properties", {}).keys())
-    except Exception:
-        props = set()
-
-    ft = data.get("Financing_Terms")
-    if "debt_ratio" in props or "mix" in props:
-        if isinstance(ft, dict):
-            return [("Financing_Terms", ft)]
-        return []  # no Financing_Terms present
-    # Otherwise assume it applies to the whole doc
-    return [("root", data)]
-
-
-# =============================================================================
-# Validation core
-# =============================================================================
-
-class ValidationError(Exception):
-    pass
-
-
-def validate_params(params: Dict[str, Any], mode: str = "strict", where: Optional[str] = None) -> None:
-    """
-    Validate a parameter mapping.
-      - STRICT: run schemas; raise on first error
-      - RELAXED: drop ignorable metadata keys, try again; if still failing,
-                 do not raise (smoke runs tolerate).
-    """
-    m = (mode or "strict").lower()
-    if m not in {"strict", "relaxed"}:
-        m = "strict"
-
-    # Unwrap one container level if present
-    base = _unwrap_params(params)
-
-    # Load validators if available
-    validators = _iter_json_validators()
-
-    if not validators:
-        # No schemas available. In STRICT, we still accept (no-op)
-        # because earlier strictness came from custom key filters.
-        # That logic now lives in scenario_runner’s wrapper if needed.
-        return
-
-    def _run_all(_data: Dict[str, Any]) -> None:
-        for v in validators:
-            for label, sub in _schema_targets_for_validator(v, _data):
-                try:
-                    v.validate(sub)
-                except Exception as e:
-                    # Wrap with context including 'where'
-                    loc = f" at {where}" if where else ""
-                    raise ValidationError(f"Schema validation failed for {label}{loc}: {e}") from e
-
-    if m == "strict":
-        _run_all(base)
-        return
-
-    # RELAXED
-    ignore = {k.casefold() for k in _ignored_keys_from_env()}
-    filtered = _filter_ignored(base, ignore)
-    try:
-        _run_all(filtered)
-    except Exception:
-        # Swallow in relaxed mode
-        return
-
-
-# =============================================================================
-# CLI
-# =============================================================================
-
-def _cli(argv: Optional[List[str]] = None) -> int:
-    p = argparse.ArgumentParser(
-        prog="validate.py",
-        description="Validate a YAML file against discovered schemas (strict or relaxed).",
-    )
-    p.add_argument("file", help="Path to YAML file to validate")
-    p.add_argument(
-        "--mode",
-        choices=["strict", "relaxed"],
-        default=_mode_from_env(),
-        help="Validation mode (default from VALIDATION_MODE / DB13_STRICT_VALIDATE).",
-    )
-    args = p.parse_args(argv)
-
-    path = Path(args.file)
-    data = load_yaml_file(path)
-    try:
-        validate_params(data, mode=args.mode, where=str(path))
-    except ValidationError as e:
-        # STRICT failure should be non-zero exit
-        sys.stderr.write(f"ERROR: {e}\n")
+        data = load_params_from_file(args.file)
+        validate_params_dict(data, mode=args.mode)
+        print("OK: validation passed")
+        return 0
+    except Exception as e:
+        print(f"ERROR: {e}")
         return 2
-
-    print("OK: validation passed")
-    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover
-    sys.exit(_cli())
+    raise SystemExit(_cli())
 
     

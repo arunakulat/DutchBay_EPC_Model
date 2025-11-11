@@ -1,101 +1,139 @@
+# dutchbay_v13/finance/cashflow.py
 from __future__ import annotations
+from typing import Dict, Any, List
 
-from dutchbay_v13.types import AnnualRow, Params, DebtTerms
-from dutchbay_v13.finance.debt import amortization_schedule
+HOURS_PER_YEAR = 8760.0
 
+def _get(d: Dict[str, Any], path: List[str], default=None):
+    cur = d
+    for k in path:
+        if not isinstance(cur, dict) or k not in cur:
+            return default
+        cur = cur[k]
+    return cur
 
-def build(
-    p: Params, d: DebtTerms
-) -> tuple[list[AnnualRow], float, float, float, float, float]:
-    years = list(range(1, p.project_life_years + 1))
-    total_debt = p.total_capex * d.debt_ratio
-    schedule = amortization_schedule(total_debt, d, p.project_life_years)
+def _as_float(x, default=None):
+    try:
+        return float(x) if x is not None else default
+    except Exception:
+        return default
 
-    rows: list[AnnualRow] = []
-    total_equity_fcf = 0.0
-    total_project_fcf = 0.0
-    npv = 0.0
-    dscr_list = []
+def _int(x, default=0) -> int:
+    try:
+        return int(x)
+    except Exception:
+        return default
 
-    for y in years:
-        fx = p.fx_initial * ((1.0 + p.fx_depr) ** (y - 1))
-        prod = _production(p, y)
-        revenue_lkr = _revenue_lkr(p, prod)
-        revenue_usd = revenue_lkr / fx
-        opex = _opex_usd(p, y, prod, fx)
-        sscl = revenue_usd * p.sscl_rate
-        ebit = revenue_usd - opex - sscl
+def _years_total(p: Dict[str, Any]) -> int:
+    # Prefer explicit ops timeline; else fallback to lifetime_years
+    ops_years = _int(_get(p, ["project", "timeline", "ops_years"]), None)
+    if ops_years is not None:
+        pre = _int(_get(p, ["project", "timeline", "ppa_to_fc_years"]), 0) \
+            + _int(_get(p, ["project", "timeline", "construction_years"]), 0)
+        return pre + ops_years
+    return _int(_get(p, ["project", "timeline", "lifetime_years"]), 20)
 
-        debt_year = schedule[y - 1]
-        interest = debt_year.interest
-        principal = debt_year.principal
+def _ops_start_index(p: Dict[str, Any]) -> int:
+    return _int(_get(p, ["project", "timeline", "ppa_to_fc_years"]), 0) \
+         + _int(_get(p, ["project", "timeline", "construction_years"]), 0)
 
-        ebt = ebit - interest
-        tax = max(0.0, ebt * p.tax_rate)
-        cfads = ebit - interest - tax
-        equity_fcf = cfads - principal
-        dscr = cfads / (interest + principal) if (interest + principal) > 0 else None
+def _capacity_mw(p: Dict[str, Any]) -> float:
+    v = _get(p, ["project", "capacity_mw"])
+    if v is None:
+        v = p.get("capacity_mw")
+    return _as_float(v, 1.0) or 1.0
 
-        npv += equity_fcf / ((1.0 + p.discount_rate) ** y)
-        total_equity_fcf += equity_fcf
-        total_project_fcf += cfads
-        if dscr is not None:
-            dscr_list.append(dscr)
+def _availability(p: Dict[str, Any]) -> float:
+    v = _as_float(p.get("availability_pct"), 95.0) or 95.0
+    return max(0.0, min(1.0, v / 100.0))
 
-        row = AnnualRow(
-            year=y,
-            fx_rate=fx,
-            production_mwh=prod,
-            revenue_usd=revenue_usd,
-            opex_usd=opex,
-            sscl_usd=sscl,
-            ebit_usd=ebit,
-            interest_usd=interest,
-            principal_usd=principal,
-            ebt_usd=ebt,
-            tax_usd=tax,
-            cfads_usd=cfads,
-            equity_fcf_usd=equity_fcf,
-            debt_service_usd=interest + principal,
-            dscr=dscr,
-        )
-        rows.append(row)
+def _loss_factor(p: Dict[str, Any]) -> float:
+    v = _as_float(p.get("loss_factor"), 0.0) or 0.0
+    return max(0.0, min(1.0, v))
 
-    equity_irr = _irr([r.equity_fcf_usd for r in rows])
-    project_irr = _irr([r.cfads_usd for r in rows])
-    min_dscr = min(dscr_list) if dscr_list else 0.0
-    avg_dscr = sum(dscr_list) / len(dscr_list) if dscr_list else 0.0
+def _fx_curve(p: Dict[str, Any], n: int) -> List[float]:
+    explicit = _get(p, ["fx", "curve_lkr_per_usd"])
+    if isinstance(explicit, list) and explicit:
+        if len(explicit) >= n:
+            return [float(x) for x in explicit[:n]]
+        return [float(x) for x in explicit] + [float(explicit[-1])] * (n - len(explicit))
+    start = _as_float(_get(p, ["fx", "start_lkr_per_usd"]), 300.0) or 300.0
+    depr = _as_float(_get(p, ["fx", "annual_depr"]), 0.03) or 0.03
+    out: List[float] = []
+    cur = float(start)
+    for _ in range(max(1, n)):
+        out.append(cur)
+        cur *= (1.0 + depr)
+    return out
 
-    return rows, equity_irr, project_irr, npv, min_dscr, avg_dscr
+def _energy_series_mwh(p: Dict[str, Any], years: int, ops_start: int) -> List[float]:
+    # 1) explicit list
+    explicit = _get(p, ["energy", "mwh_per_year"])
+    if isinstance(explicit, list) and len(explicit) >= years:
+        ser = [float(x) for x in explicit[:years]]
+        for i in range(min(ops_start, years)):
+            ser[i] = 0.0
+        return ser
+    # 2) explicit scalar
+    if explicit is not None and not isinstance(explicit, list):
+        val = float(explicit)
+        return [0.0]*ops_start + [val]*(years - ops_start)
+    # 3) capacity factor
+    cf = _as_float(_get(p, ["energy", "capacity_factor"]), None)
+    cap = _capacity_mw(p)
+    lf = _loss_factor(p)
+    av = _availability(p)
+    if cf is not None:
+        net_cf = max(0.0, min(1.0, cf)) * max(0.0, min(1.0, 1.0 - lf)) * max(0.0, min(1.0, av))
+        mwh = cap * HOURS_PER_YEAR * net_cf
+        return [0.0]*ops_start + [mwh]*(years - ops_start)
+    # 4) derive from availability and losses only (last resort)
+    net_cf = max(0.0, min(1.0, av * (1.0 - lf)))
+    mwh = cap * HOURS_PER_YEAR * net_cf
+    return [0.0]*ops_start + [mwh]*(years - ops_start)
 
+def _tariff_mode(p: Dict[str, Any]) -> str:
+    if _get(p, ["tariff_usd_per_kwh"]) is not None or _get(p, ["tariff", "usd_per_kwh"]) is not None:
+        return "USD"
+    return "LKR"
 
-def _production(p: Params, year: int) -> float:
-    return (
-        p.cf_p50
-        * p.nameplate_mw
-        * p.hours_per_year
-        * ((1.0 - p.yearly_degradation) ** (year - 1))
-    )
+def _tariff_usd_per_kwh(p: Dict[str, Any], fx: List[float], t: int) -> float:
+    usd = _get(p, ["tariff", "usd_per_kwh"])
+    if usd is None:
+        usd = _get(p, ["tariff_usd_per_kwh"])
+    if usd is not None:
+        return float(usd)
+    lkr = _get(p, ["tariff", "lkr_per_kwh"])
+    if lkr is None:
+        lkr = _get(p, ["tariff_lkr_per_kwh"])
+    lkr_val = _as_float(lkr, None)
+    if lkr_val is None:
+        return 0.0
+    # unindexed LKR tariff → convert each year at that year's FX
+    return float(lkr_val) / float(fx[t])
 
+def _opex_usd_per_year(p: Dict[str, Any]) -> float:
+    floor = _as_float(_get(p, ["opex", "floor_usd_per_year"]), 300_000.0) or 300_000.0
+    v = _as_float(_get(p, ["opex", "usd_per_year"]), floor) or floor
+    return max(v, floor)
 
-def _revenue_lkr(p: Params, prod_mwh: float) -> float:
-    return prod_mwh * 1_000 * p.tariff_lkr_kwh
+def build_annual_rows(p: Dict[str, Any]) -> List[Dict[str, float]]:
+    years = _years_total(p)
+    ops_start = _ops_start_index(p)
+    fx = _fx_curve(p, years)
+    mwh = _energy_series_mwh(p, years, ops_start)
+    opex_flat = _opex_usd_per_year(p)
 
+    rows: List[Dict[str, float]] = []
+    for t in range(years):
+        if t < ops_start:
+            rows.append({"year": t+1, "revenue_usd": 0.0, "opex_usd": 0.0, "cfads_usd": 0.0})
+            continue
+        tariff_usd = _tariff_usd_per_kwh(p, fx, t)
+        revenue_usd = (mwh[t] * tariff_usd) / 1_000.0  # kWh = MWh*1000 → divide by 1000
+        opex_usd = opex_flat
+        cfads = revenue_usd - opex_usd
+        rows.append({"year": t+1, "revenue_usd": revenue_usd, "opex_usd": opex_usd, "cfads_usd": cfads})
+    return rows
 
-def _opex_usd(p: Params, year: int, prod_mwh: float, fx: float) -> float:
-    if p.opex_usd_mwh is None:
-        raise ValueError("opex_usd_mwh must be set or computed before cashflow calc")
-    usd_comp = (
-        p.opex_usd_mwh * p.opex_split_usd * ((1.0 + p.opex_esc_usd) ** (year - 1))
-    )
-    lkr_comp = (
-        p.opex_usd_mwh * p.opex_split_lkr * ((1.0 + p.opex_esc_lkr) ** (year - 1)) / fx
-    )
-    return usd_comp + lkr_comp
-
-
-def _irr(cashflows: list[float]) -> float:
-    from numpy_financial import irr as np_irr
-
-    result = np_irr([-cashflows[0]] + cashflows[1:]) if cashflows else 0.0
-    return float(result) if result else 0.0
+    
