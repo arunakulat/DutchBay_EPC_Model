@@ -1,0 +1,14 @@
+# Inputs for tagged release runs (assets attached to GitHub Release)
+project:
+  capacity_mw: 150
+  timeline:
+    lifetime_years: 25
+
+capex:
+  usd_total: 225000000
+
+metrics:
+  npv_discount_rate: 0.12
+
+Financing_Terms:
+  debt_ratio: 0.0

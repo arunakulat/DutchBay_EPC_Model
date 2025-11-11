@@ -67,3 +67,10 @@ scenario_*_results_*.csv
 scenario_*_annual_*.csv
 .venv311/
 venv/
+.DS_Store
+_out/
+.pytest_cache_local/
+.venv*/
+venv/
+.coverage
+.mypy_cache/
