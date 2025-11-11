@@ -60,3 +60,8 @@ htmlcov/
 .vscode/
 .idea/
 *.swp
+
+_out/
+scenario_*_results_*.jsonl
+scenario_*_results_*.csv
+scenario_*_annual_*.csv
