@@ -1,63 +1,53 @@
-name: Release run & attach assets
+name: Release Run
 
 on:
   push:
     tags:
       - "v*"
-  workflow_dispatch:
+
+permissions:
+  contents: write  # needed to create a GitHub Release + upload assets
 
 jobs:
-  run-and-release:
-    if: startsWith(github.ref, 'refs/tags/')
+  build-and-release:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: Upgrade pip & install deps
         run: |
-          python -m pip install --upgrade pip wheel setuptools
-          if [ -f requirements.txt ]; then pip install -r requirements.txt || true; fi
-          # editable install if present (safe to no-op if not)
-          if [ -f pyproject.toml ] || [ -f setup.py ]; then pip install -e . || true; fi
-          # lightweight runtime deps used by validate/cli
-          pip install pyyaml jsonschema
+          python -m pip install -U pip
+          python -m pip install pyyaml jsonschema
 
-      - name: Validate scenario (strict)
-        env:
-          VALIDATION_MODE: strict
-        run: python -m dutchbay_v13.validate inputs/scenarios/release_case.yaml
+      - name: Validate scenario
+        run: python -m dutchbay_v13.validate dutchbay_v13/inputs/scenarios/release_case.yaml
 
-      - name: Run model (IRR) and write outputs
+      - name: Run IRR scenario (CSV + JSON)
         run: |
-          rm -rf _out && mkdir -p _out
-          python -m dutchbay_v13 --mode irr --config inputs/scenarios/release_case.yaml --out _out --fmt csv
-          ls -al _out
+          python -m dutchbay_v13 --mode irr \
+            --config dutchbay_v13/inputs/scenarios/release_case.yaml \
+            --out _out --fmt csv
 
-      - name: Upload run artifacts (for debugging)
+      - name: Upload run artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: release-run_${{ github.ref_name }}
-          path: |
-            _out/summary.json
-            _out/*_results_*.csv
+          name: results-${{ github.ref_name }}
+          path: _out/*
 
-      - name: Publish GitHub Release with assets
+      - name: Create GitHub Release and attach artifacts
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          body: |
+            Automated release for ${{ github.ref_name }}.
+            Includes scenario outputs (summary.json and results CSV).
           files: |
-            _out/summary.json
-            _out/*_results_*.csv
-          draft: false
-          prerelease: false
-
-          
+            _out/*
