@@ -1,229 +1,195 @@
-# dutchbay_v13/validate.py
 from __future__ import annotations
 
-import argparse
 import os
+import sys
+import json
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Union
+from typing import Any, Dict, Iterable, Optional
 
-Pathish = Union[str, Path]
+# Public API expected by the rest of the codebase/tests
+__all__ = ["validate_params_dict", "load_params_from_file"]
 
-try:
-    import yaml  # type: ignore
-except Exception:  # pragma: no cover
-    yaml = None  # type: ignore
+# Top-level keys we recognize in strict mode (relaxed mode allows extras)
+_ALLOWED_TOP_KEYS = {
+    "name",
+    "project",
+    "capex",
+    "opex",
+    "fx",
+    "Financing_Terms",
+    "metrics",
+    "scenarios",  # optional
+}
 
-# Try optional jsonschema if present; otherwise we do a lightweight structural check.
-try:  # pragma: no cover
-    import jsonschema  # type: ignore
-except Exception:  # pragma: no cover
-    jsonschema = None  # type: ignore
+
+# -----------------------
+# YAML loading utilities
+# -----------------------
+def _read_yaml_file(path: Path) -> Dict[str, Any]:
+    try:
+        import yaml  # lazy import to avoid hard dependency during test collection
+    except Exception as exc:
+        print("ERROR: PyYAML is required to read configuration files. Please install pyyaml.", file=sys.stderr)
+        raise SystemExit(2) from exc
+
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        print(f"ERROR: Failed to parse YAML: {path} -> {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
+
+    if not isinstance(data, dict):
+        print(f"ERROR: YAML root must be a mapping (dict). Got: {type(data).__name__}", file=sys.stderr)
+        raise SystemExit(2)
+    return data
 
 
-# ---------------------------
-# Schema discovery (optional)
-# ---------------------------
+def load_params_from_file(path: Path) -> Dict[str, Any]:
+    """Load and return the parameter mapping from YAML."""
+    return _read_yaml_file(Path(path))
 
-def _schema_paths() -> List[Path]:
-    """
-    Where to look for YAML schemas. We use:
-      - package default: dutchbay_v13/inputs/schema
-      - any extra paths hinted by dutchbay_v13.schema.EXTRA_SCHEMA_PATHS (if present)
-      - env var EXTRA_SCHEMA_PATHS (colon-separated)
-    """
-    paths: List[Path] = []
+
+# -----------------------------------------
+# Optional JSON Schema validation (scoped)
+# -----------------------------------------
+def _find_schema_paths() -> Iterable[Path]:
+    """Discover schema roots. Built-in + optional extra paths."""
+    roots: list[Path] = []
+    # Local package schema folder: dutchbay_v13/inputs/schema
     pkg_root = Path(__file__).resolve().parent
-    default = pkg_root / "inputs" / "schema"
-    if default.exists():
-        paths.append(default)
+    default_schema_root = pkg_root / "inputs" / "schema"
+    if default_schema_root.is_dir():
+        roots.append(default_schema_root)
 
-    # optional code-level hint
+    # Optional: allow extension via module-level EXTRA_SCHEMA_PATHS (if present)
     try:
         from . import schema as _schema_mod  # type: ignore
-        extra = getattr(_schema_mod, "EXTRA_SCHEMA_PATHS", [])
-        for p in extra or []:
-            pp = Path(p).expanduser().resolve()
-            if pp.exists():
-                paths.append(pp)
+        extra = getattr(_schema_mod, "EXTRA_SCHEMA_PATHS", None)
+        if isinstance(extra, (list, tuple)):
+            for p in extra:
+                pp = Path(str(p)).expanduser()
+                if pp.is_dir():
+                    roots.append(pp)
     except Exception:
-        pass
+        pass  # no schema extension available
 
-    # optional env override
-    env = os.environ.get("EXTRA_SCHEMA_PATHS")
-    if env:
-        for p in env.split(":"):
-            pp = Path(p).expanduser().resolve()
-            if pp.exists():
-                paths.append(pp)
+    # Optional: env override (colon-separated)
+    env_extra = os.environ.get("EXTRA_SCHEMA_PATHS")
+    if env_extra:
+        for token in env_extra.split(os.pathsep):
+            pp = Path(token).expanduser()
+            if pp.is_dir():
+                roots.append(pp)
 
-    # De-dup while preserving order
-    seen: set = set()
-    uniq: List[Path] = []
-    for p in paths:
-        if str(p) not in seen:
-            seen.add(str(p))
-            uniq.append(p)
-    return uniq
-
-
-def _load_yaml_file(path: Pathish) -> Dict[str, Any]:
-    p = Path(path)
-    if not p.exists():
-        raise FileNotFoundError(f"YAML not found: {p}")
-    if yaml is None:
-        raise RuntimeError("PyYAML is not available in this environment.")
-    with p.open("r", encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
-        if not isinstance(data, dict):
-            raise TypeError(f"Top-level YAML must be a mapping, got {type(data).__name__}")
-        return data
+    # Deduplicate while preserving order
+    seen = set()
+    out: list[Path] = []
+    for r in roots:
+        if r not in seen:
+            out.append(r)
+            seen.add(r)
+    return out
 
 
-def _load_financing_schema() -> Optional[Dict[str, Any]]:
+def _maybe_validate_financing_terms(params: Dict[str, Any], *, strict: bool) -> None:
     """
-    Best-effort: load financing_terms.schema.yaml if found in any schema path.
+    If jsonschema + financing_terms.schema.yaml are available, validate
+    params['Financing_Terms'] against it. On error: strict -> SystemExit; relaxed -> warn.
     """
-    names = {"financing_terms.schema.yaml", "Financing_Terms.schema.yaml"}
-    for base in _schema_paths():
-        for name in names:
-            cand = base / name
-            if cand.exists():
-                try:
-                    return _load_yaml_file(cand)
-                except Exception:
-                    # ignore corrupted schema; fall back to lightweight check
-                    return None
-    return None
-
-
-# ------------------------------------
-# Public API used by scenario_runner
-# ------------------------------------
-
-def load_params_from_file(path: Pathish) -> Dict[str, Any]:
-    """
-    Load a config YAML (e.g., full_model_variables_updated.yaml) into a dict.
-    """
-    return _load_yaml_file(path)
-
-
-def _lightweight_financing_check(d: Dict[str, Any], strict: bool) -> None:
-    """
-    Minimal structural guardrails when jsonschema is unavailable.
-    Only enforces obvious typos and nesting under Financing_Terms.
-    """
-    ft = d.get("Financing_Terms")
-    if ft is None:
-        return
+    ft = params.get("Financing_Terms")
     if not isinstance(ft, dict):
-        raise TypeError("Financing_Terms must be a mapping.")
-
-    allowed_top = {
-        "debt_ratio",
-        "tenor_years",
-        "interest_only_years",
-        "amortization",
-        "dscr_target",
-        "min_dscr",
-        "mix",
-        "rates",
-        "reserves",
-        "fees",
-        "dscr_haircut_factor",
-    }
-    allowed_mix = {"lkr_max", "dfi_max", "usd_commercial_min"}
-    allowed_rates = {"lkr_floor", "usd_floor", "dfi_floor"}
-    allowed_reserves = {"dsra_months", "receivables_guarantee_months"}
-    allowed_fees = {"upfront_pct", "commitment_pct"}
-
-    if strict:
-        unknown = set(ft.keys()) - allowed_top
-        if unknown:
-            raise ValueError(f"Unknown Financing_Terms keys (strict): {sorted(unknown)}")
-
-    mix = ft.get("mix")
-    if mix is not None:
-        if not isinstance(mix, dict):
-            raise TypeError("Financing_Terms.mix must be a mapping.")
-        if strict:
-            unk = set(mix.keys()) - allowed_mix
-            if unk:
-                raise ValueError(f"Unknown Financing_Terms.mix keys (strict): {sorted(unk)}")
-
-    rates = ft.get("rates")
-    if rates is not None:
-        if not isinstance(rates, dict):
-            raise TypeError("Financing_Terms.rates must be a mapping.")
-        if strict:
-            unk = set(rates.keys()) - allowed_rates
-            if unk:
-                raise ValueError(f"Unknown Financing_Terms.rates keys (strict): {sorted(unk)}")
-
-    reserves = ft.get("reserves")
-    if reserves is not None:
-        if not isinstance(reserves, dict):
-            raise TypeError("Financing_Terms.reserves must be a mapping.")
-        if strict:
-            unk = set(reserves.keys()) - allowed_reserves
-            if unk:
-                raise ValueError(f"Unknown Financing_Terms.reserves keys (strict): {sorted(unk)}")
-
-    fees = ft.get("fees")
-    if fees is not None:
-        if not isinstance(fees, dict):
-            raise TypeError("Financing_Terms.fees must be a mapping.")
-        if strict:
-            unk = set(fees.keys()) - allowed_fees
-            if unk:
-                raise ValueError(f"Unknown Financing_Terms.fees keys (strict): {sorted(unk)}")
-
-
-def validate_params_dict(d: Dict[str, Any], mode: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Validate a params dict. STRICT raises on unknown/invalid keys.
-    RELAXED tolerates harmless extras.
-    If jsonschema is present and a schema is found, we validate with it; otherwise we do a lightweight check.
-    """
-    vm = (mode or os.environ.get("VALIDATION_MODE") or "relaxed").strip().lower()
-    strict = vm == "strict"
-
-    schema = _load_financing_schema() if jsonschema is not None else None
-    if schema and jsonschema is not None:
-        try:
-            jsonschema.validate(instance=d, schema=schema)  # type: ignore
-        except Exception as e:
-            if not strict:
-                # In relaxed mode, only re-raise structural errors; unknown fields are allowed.
-                raise
-            raise
-    else:
-        _lightweight_financing_check(d, strict=strict)
-
-    return d
-
-
-# -----------------------
-# CLI entry for `-m`
-# -----------------------
-
-def _cli() -> int:
-    ap = argparse.ArgumentParser(description="Validate a DutchBay YAML config.")
-    ap.add_argument("file", help="Path to YAML file.")
-    ap.add_argument("--mode", choices=["strict", "relaxed"], default=None,
-                    help="Override validation mode (default: env VALIDATION_MODE or relaxed).")
-    args = ap.parse_args()
+        return  # nothing to validate or not a mapping
 
     try:
-        data = load_params_from_file(args.file)
-        validate_params_dict(data, mode=args.mode)
-        print("OK: validation passed")
-        return 0
-    except Exception as e:
-        print(f"ERROR: {e}")
-        return 2
+        import yaml
+        import jsonschema
+        from jsonschema import Draft202012Validator as _Validator  # use modern draft if present
+    except Exception:
+        return  # schema validation is optional; skip quietly
+
+    # Locate the specific schema file by name in any known schema root
+    schema_doc: Optional[Dict[str, Any]] = None
+    for root in _find_schema_paths():
+        cand = root / "financing_terms.schema.yaml"
+        if cand.is_file():
+            try:
+                schema_doc = yaml.safe_load(cand.read_text(encoding="utf-8"))
+            except Exception:
+                schema_doc = None
+            if isinstance(schema_doc, dict):
+                break
+
+    if not isinstance(schema_doc, dict):
+        return  # no schema found; skip
+
+    try:
+        _Validator.check_schema(schema_doc)  # early sanity
+        validator = _Validator(schema_doc)
+        validator.validate(ft)
+    except Exception as exc:
+        msg = f"Schema validation error for Financing_Terms: {exc}"
+        if strict:
+            print(f"ERROR: {msg}", file=sys.stderr)
+            raise SystemExit(2)
+        else:
+            print(f"WARNING: {msg}", file=sys.stderr)
 
 
-if __name__ == "__main__":  # pragma: no cover
-    raise SystemExit(_cli())
+# -------------------------------
+# Core validation entry point
+# -------------------------------
+def validate_params_dict(p: Dict[str, Any], mode: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Validate a parameter mapping.
+
+    - Strict: reject unknown TOP-LEVEL keys (exact match to _ALLOWED_TOP_KEYS).
+              Also applies schema validation to Financing_Terms if available.
+    - Relaxed (default): allow extras; schema validation warnings only.
+
+    Returns the same mapping (pass-through) when successful.
+    Raises SystemExit(2) on fatal validation errors (strict unknown keys or schema errors).
+    """
+    m = (mode or os.environ.get("VALIDATION_MODE") or "relaxed").strip().lower()
+    strict = (m == "strict")
+
+    if strict:
+        unknown = sorted(set(p.keys()) - _ALLOWED_TOP_KEYS)
+        if unknown:
+            print(f"ERROR: unknown top-level keys (strict mode): {unknown}", file=sys.stderr)
+            raise SystemExit(2)
+
+    # Optional JSON Schema check focused on Financing_Terms
+    _maybe_validate_financing_terms(p, strict=strict)
+    return p
+
+
+# -------------------------------
+# Tiny CLI for local validation
+# -------------------------------
+def _build_parser():
+    import argparse
+
+    ap = argparse.ArgumentParser(prog="dutchbay_v13.validate")
+    ap.add_argument("file", help="Path to YAML parameters file")
+    ap.add_argument(
+        "--mode",
+        choices=["strict", "relaxed"],
+        default=os.environ.get("VALIDATION_MODE", "relaxed"),
+        help="Validation mode (default from $VALIDATION_MODE or 'relaxed').",
+    )
+    return ap
+
+
+def _main(argv: Optional[list[str]] = None) -> int:
+    ap = _build_parser()
+    args = ap.parse_args(argv)
+    params = load_params_from_file(Path(args.file))
+    validate_params_dict(params, mode=args.mode)
+    print("OK: validation passed")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())
 
     

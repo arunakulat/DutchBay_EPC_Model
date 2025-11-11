@@ -1,145 +1,121 @@
-# dutchbay_v13/scenario_runner.py
+#!/usr/bin/env python3
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 import csv
 import json
+import os
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-try:
-    import yaml  # type: ignore
-except Exception:  # pragma: no cover
-    yaml = None  # type: ignore
-
-from .adapters import run_irr  # core calc; debt layer is applied within adapters
-from .validate import validate_params_dict, load_params_from_file  # strict/relaxed handled there
-
-
-Pathish = Union[str, Path]
+from .validate import load_params_from_file
+from .adapters import run_irr
 
 
-def _ensure_dir(p: Path) -> None:
-    p.mkdir(parents=True, exist_ok=True)
+@dataclass
+class RunResult:
+    summary: Dict[str, Any]
+    summary_path: Optional[Path] = None
+    results_path: Optional[Path] = None
 
 
-def _to_csv_rows(annual: List[Dict[str, Any]]) -> Tuple[List[str], List[List[Any]]]:
-    """
-    Produce (header, rows) for CSV from a list of annual dicts.
-    Keys are unioned and ordered with a small preference for common fields.
-    """
-    if not annual:
-        return [], []
-    # Union keys
-    keys = set()
-    for row in annual:
-        keys.update(row.keys())
-
-    # Prefer this order if present, then append the rest sorted
-    preferred = [
-        "year",
-        "revenue_usd",
-        "cfads_usd",
-        "equity_cf",
-        "debt_service",
-        "interest",
-        "principal",
-        "dscr",
-    ]
-    ordered = [k for k in preferred if k in keys] + [k for k in sorted(keys) if k not in set(preferred)]
-
-    rows = []
-    for row in annual:
-        rows.append([row.get(k, "") for k in ordered])
-    return ordered, rows
+def _ts() -> str:
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
-def _write_outputs(outputs_dir: Path, fmt: str, res: Dict[str, Any], save_annual: bool) -> None:
-    _ensure_dir(outputs_dir)
-
-    # Always drop a summary JSON
-    summary_path = outputs_dir / "summary.json"
-    with summary_path.open("w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "equity_irr": res.get("equity_irr"),
-                "project_irr": res.get("project_irr"),
-                "npv_12": res.get("npv_12"),
-                "dscr_min": res.get("dscr_min"),
-                "balloon_remaining": res.get("balloon_remaining"),
-            },
-            f,
-            indent=2,
-        )
-
-    if save_annual:
-        annual = res.get("annual") or []
-        if fmt.lower() == "csv":
-            header, rows = _to_csv_rows(annual)
-            if header:
-                with (outputs_dir / "annual.csv").open("w", newline="", encoding="utf-8") as f:
-                    writer = csv.writer(f)
-                    writer.writerow(header)
-                    writer.writerows(rows)
-        else:
-            # JSON fallback (extensible later)
-            with (outputs_dir / "annual.json").open("w", encoding="utf-8") as f:
-                json.dump(annual, f, indent=2)
-
-
-def run_params(
-    params: Dict[str, Any],
-    outputs_dir: Optional[Pathish] = None,
+def _write_outputs(
+    config_path: Path,
+    outputs_dir: Path,
+    summary: Dict[str, Any],
     *,
-    mode: str = "irr",
     fmt: str = "csv",
     save_annual: bool = False,
-) -> Dict[str, Any]:
+) -> RunResult:
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    stem = Path(config_path).stem
+
+    # summary.json
+    summary_path = outputs_dir / "summary.json"
+    summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+    results_path: Optional[Path] = None
+    annual_rows: List[Dict[str, Any]] = list(summary.get("annual") or [])
+    if save_annual:
+        if fmt == "csv":
+            results_path = outputs_dir / f"{stem}_results_{_ts()}.csv"
+            preferred = ["year", "revenue_usd", "cfads_usd", "equity_cf", "debt_service"]
+            keys = list({k for r in annual_rows for k in r.keys()})
+            ordered = [k for k in preferred if k in keys] + [k for k in keys if k not in preferred]
+            if not ordered:
+                ordered = ["year", "cfads_usd", "equity_cf"]
+            with results_path.open("w", newline="", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=ordered)
+                w.writeheader()
+                for row in annual_rows:
+                    w.writerow({k: row.get(k) for k in ordered})
+        elif fmt == "jsonl":
+            results_path = outputs_dir / f"{stem}_results_{_ts()}.jsonl"
+            with results_path.open("w", encoding="utf-8") as f:
+                for row in annual_rows:
+                    f.write(json.dumps(row) + "\n")
+
+    return RunResult(summary=summary, summary_path=summary_path, results_path=results_path)
+
+
+def _synthesize_annual_relaxed(params: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
-    Execute a scenario from an in-memory params dict.
-    - Validates via validate_params_dict (env-aware strict/relaxed).
-    - Calls adapters.run_irr(params, annual).
-    - Writes outputs if requested.
+    Minimal placeholder CFADS stream for relaxed mode only.
+    Goal: keep IRR calculable when analysts haven't provided `annual` yet.
+    This is *not* used in strict mode.
     """
-    if mode != "irr":
-        raise ValueError(f"Unsupported mode: {mode}")
+    proj = params.get("project", {}) or {}
+    tl = (proj.get("timeline") or {})
+    years = int(tl.get("lifetime_years") or 25)
 
-    # Validate (raises on STRICT unknown keys; relaxed otherwise)
-    params = validate_params_dict(params)
+    capex = params.get("capex", {}) or {}
+    cap_total = capex.get("usd_total")
+    if cap_total is None:
+        cap_per_mw = float(capex.get("usd_per_mw") or 1_000_000.0)
+        cap = float(proj.get("capacity_mw") or 1.0)
+        cap_total = cap_per_mw * cap
+    cap_total = float(cap_total)
 
-    # Extract inlined annual (optional)
-    annual = params.get("annual")
-    if annual is not None and not isinstance(annual, list):
-        raise TypeError("If provided, `annual` must be a list of {year, ...} mappings")
-
-    res = run_irr(params, annual)
-
-    # Basic sanity: run_irr must return a mapping
-    if not isinstance(res, dict):
-        raise TypeError(f"run_irr must return a mapping-compatible result, got {type(res).__name__}")
-
-    # Optional outputs
-    if outputs_dir is not None:
-        out_dir = Path(outputs_dir)
-        _write_outputs(out_dir, fmt, res, save_annual)
-
-    return res
+    # Tiny positive CFADS so IRR is defined; deliberately conservative.
+    # ~2% of CAPEX per year as placeholder.
+    cfads_year = max(cap_total * 0.02, 1_000_000.0)
+    return [{"year": i + 1, "cfads_usd": cfads_year} for i in range(years)]
 
 
 def run_dir(
-    config_path: Pathish,
-    outputs_dir: Pathish,
+    config_path: Path | str,
+    outputs_dir: Path,
     *,
     mode: str = "irr",
     fmt: str = "csv",
     save_annual: bool = False,
-) -> Dict[str, Any]:
-    """
-    File-based entry (used by CLI). Validates, runs, and writes outputs.
-    """
-    params = load_params_from_file(config_path)
-    return run_params(params, outputs_dir, mode=mode, fmt=fmt, save_annual=save_annual)
+    require_annual: bool = False,
+) -> RunResult:
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+
+    params: Dict[str, Any] = load_params_from_file(Path(config_path))
+    mode_env = (os.environ.get("VALIDATION_MODE") or "relaxed").strip().lower()
+    has_annual = bool(params.get("annual"))
+
+    if (require_annual or mode_env == "strict") and not has_annual:
+        raise SystemExit("Strict run requires explicit 'annual' CFADS in config (no placeholders).")
+
+    annual: List[Dict[str, Any]] = list(params.get("annual") or [])
+    if not annual and mode_env != "strict":
+        annual = _synthesize_annual_relaxed(params)
+
+    if mode == "irr":
+        summary = run_irr(params, annual)
+    else:
+        raise SystemExit(f"Unknown mode: {mode}")
+
+    return _write_outputs(Path(config_path), outputs_dir, summary, fmt=fmt, save_annual=save_annual)
 
 
-# Back-compat alias
-run_file = run_dir
+__all__ = ["RunResult", "run_dir"]
 
