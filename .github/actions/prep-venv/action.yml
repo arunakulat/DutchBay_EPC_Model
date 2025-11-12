@@ -1,0 +1,12 @@
+name: prep-venv
+description: Remove stray .venv file so venv creation doesn’t fail
+runs:
+  using: "composite"
+  steps:
+    - name: Preflight: ensure .venv is not a plain file
+      shell: bash
+      run: |
+        if [ -f .venv ] && [ ! -d .venv ]; then
+          echo "Removing stray .venv file so python3 -m venv can create a directory"
+          rm -f .venv
+        fi
