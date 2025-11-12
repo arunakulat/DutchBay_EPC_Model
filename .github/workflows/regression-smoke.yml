@@ -1,6 +1,9 @@
+mkdir -p .github/workflows
+
+cat > .github/workflows/regression-smoke.yml <<'YAML'
 name: Regression Smoke
 on:
-  workflow_dispatch:
+  workflow_dispatch: {}    # allow gh workflow run
   push:
     branches: [ main ]
 
@@ -8,45 +11,35 @@ jobs:
   smoke:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      # Belt-and-suspenders guard BEFORE any call to the bootstrap script
+      # Belt-and-suspenders: if a stray file named .venv exists, remove it.
       - name: Ensure .venv is not a file
-        shell: bash
         run: |
           if [ -f .venv ] && [ ! -d .venv ]; then
-            echo "Removing tracked .venv file so python3 -m venv can create a directory"
+            echo "Removing tracked .venv file so python3 -m venv could create a directory (if we ever used one)"
             rm -f .venv
           fi
 
-      # If your smoke job calls the bootstrap, keep this; otherwise remove both this and the guard above.
-      - name: Run bootstrap
-        if: ${{ always() }} # keep near the guard
-        shell: bash
-        run: bash scripts/roll_zip_and_bootstrap.sh
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with: { python-version: '3.11' }
-
-        # Option A: no venv in CI (recommended)
-      - name: Install deps
-        shell: bash
+      - name: Install deps (no venv on CI)
         run: |
           python -m pip install -U pip
-          python -m pip install -e .  # or: pyyaml jsonschema numpy-financial pytest
+          python -m pip install -e .
+          python -m pip install -U pytest pyyaml jsonschema
 
-      - name: Validate minimal scenario
-        shell: bash
+      - name: Run smoke tests
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
         run: |
-          python -m dutchbay_v13.validate full_model_variables_updated.yaml
+          python -m pytest -q -c /dev/null -o cache_dir=.pytest_cache_ci \
+            tests/smoke/test_cli_e2e.py::test_cli_e2e \
+            tests/smoke/test_runner_and_validation.py::test_run_dir_writes_outputs_csv \
+            tests/smoke/test_runner_and_validation.py::test_strict_rejects_unknown_key \
+            tests/smoke/test_runner_and_validation.py::test_relaxed_allows_metadata \
+            tests/architecture/test_irr_is_singleton.py
+YAML
 
-      - name: Run IRR smoke
-        shell: bash
-        run: |
-          rm -rf _out && mkdir _out
-          python -m dutchbay_v13 --mode irr --config full_model_variables_updated.yaml --out _out --fmt csv
-          ls -l _out
-
-          

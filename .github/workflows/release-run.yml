@@ -1,3 +1,4 @@
+cat > .github/workflows/release-run.yml <<'YAML'
 name: Release Run
 on:
   push:
@@ -10,50 +11,37 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      # Guard BEFORE any bootstrap call
+      # Guard against a stray .venv file in the repo
       - name: Ensure .venv is not a file
-        shell: bash
         run: |
-          if [ -f .venv ] && [ ! -d .venv ]; then
-            echo "Removing tracked .venv file so python3 -m venv can create a directory"
-            rm -f .venv
-          fi
+          if [ -f .venv ] && [ ! -d .venv ]; then rm -f .venv; fi
 
-      # If you use the bootstrap script in release, keep this; otherwise remove both
-      - name: Run bootstrap (optional)
-        if: ${{ always() }}
-        shell: bash
-        run: bash scripts/roll_zip_and_bootstrap.sh
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with: { python-version: '3.11' }
-
-      - name: Install deps
-        shell: bash
+      - name: Install deps (no venv on CI)
         run: |
           python -m pip install -U pip
           python -m pip install -e .
+          python -m pip install -U pyyaml jsonschema
 
       - name: Validate canned scenario
-        shell: bash
         run: |
-          python -m dutchbay_v13.validate inputs/scenarios/release_case.yaml
+          python -m dutchbay_v13.validate dutchbay_v13/inputs/scenarios/release_case.yaml
 
       - name: Run IRR and generate artifacts
-        shell: bash
         run: |
           rm -rf _out && mkdir _out
-          python -m dutchbay_v13 --mode irr --config inputs/scenarios/release_case.yaml --out _out --fmt csv
+          python -m dutchbay_v13 --mode irr --config dutchbay_v13/inputs/scenarios/release_case.yaml --out _out --fmt csv
           ls -l _out
 
-      - name: Upload artifacts
+      - name: Upload artifacts (for debugging)
         uses: actions/upload-artifact@v4
         with:
-          name: release-artifacts
+          name: irr-results
           path: |
             _out/summary.json
             _out/*_results_*.csv
@@ -61,8 +49,9 @@ jobs:
       - name: Create GitHub Release and upload assets
         uses: softprops/action-gh-release@v2
         with:
+          generate_release_notes: true
           files: |
             _out/summary.json
             _out/*_results_*.csv
+YAML
 
-            
