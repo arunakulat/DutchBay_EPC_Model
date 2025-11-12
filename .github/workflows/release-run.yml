@@ -1,57 +1,85 @@
-cat > .github/workflows/release-run.yml <<'YAML'
 name: Release Run
+
 on:
   push:
     tags:
-      - 'v*.*.*'
+      - 'v*'          # trigger on version tags like v0.1.5
+  workflow_dispatch: {}  # allow manual runs if needed
+
+permissions:
+  contents: write       # required to create releases & upload assets
 
 jobs:
   build-and-release:
+    name: Build + Validate + Release
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
+    concurrency:
+      group: release-${{ github.ref }}
+      cancel-in-progress: false
 
-      # Guard against a stray .venv file in the repo
+    steps:
+      - name: Checkout (full history for tags)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Belt-and-suspenders: make sure a stray file ".venv" cannot break anything
       - name: Ensure .venv is not a file
         run: |
-          if [ -f .venv ] && [ ! -d .venv ]; then rm -f .venv; fi
+          if [ -f .venv ] && [ ! -d .venv ]; then
+            echo "Removing tracked .venv file so python3 -m venv can create a directory (if ever used)"
+            rm -f .venv
+          fi
 
-      - uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: Install deps (no venv on CI)
         run: |
           python -m pip install -U pip
-          python -m pip install -e .
-          python -m pip install -U pyyaml jsonschema
+          if [ -f pyproject.toml ] || [ -f setup.py ]; then
+            python -m pip install -e .
+          else
+            python -m pip install pyyaml jsonschema numpy-financial
+          fi
 
-      - name: Validate canned scenario
+      - name: Validate scenario (strict)
+        env:
+          VALIDATION_MODE: strict
         run: |
-          python -m dutchbay_v13.validate dutchbay_v13/dutchbay_v13/inputs/scenarios/release_case.yaml
+          python -m dutchbay_v13.validate dutchbay_v13/inputs/scenarios/release_case.yaml
 
-      - name: Run IRR and generate artifacts
+      - name: Run scenario -> _out
         run: |
-          rm -rf _out && mkdir _out
-          python -m dutchbay_v13 --mode irr --config dutchbay_v13/dutchbay_v13/inputs/scenarios/release_case.yaml --out _out --fmt csv
+          rm -rf _out && mkdir -p _out
+          python -m dutchbay_v13 \
+            --mode irr \
+            --config dutchbay_v13/inputs/scenarios/release_case.yaml \
+            --out _out \
+            --fmt csv
           ls -l _out
 
-      - name: Upload artifacts (for debugging)
-        uses: actions/upload-artifact@v4
-        with:
-          name: irr-results
-          path: |
-            _out/summary.json
-            _out/*_results_*.csv
+      - name: Assert expected outputs exist
+        id: assert_outputs
+        shell: bash
+        run: |
+          test -f _out/summary.json
+          shopt -s nullglob
+          files=( _out/*_results_*.csv )
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No results CSV produced" >&2
+            exit 1
+          fi
+          echo "results_csv=${files[0]}" >> "$GITHUB_OUTPUT"
 
-      - name: Create GitHub Release and upload assets
+      - name: Create GitHub Release + upload assets
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
           generate_release_notes: true
           files: |
             _out/summary.json
-            _out/*_results_*.csv
-YAML
-
+            ${{ steps.assert_outputs.outputs.results_csv }}
