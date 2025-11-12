@@ -30,12 +30,12 @@ jobs:
 
       - name: Validate canned scenario
         run: |
-          python -m dutchbay_v13.validate dutchbay_v13/inputs/scenarios/release_case.yaml
+          python -m dutchbay_v13.validate dutchbay_v13/dutchbay_v13/inputs/scenarios/release_case.yaml
 
       - name: Run IRR and generate artifacts
         run: |
           rm -rf _out && mkdir _out
-          python -m dutchbay_v13 --mode irr --config dutchbay_v13/inputs/scenarios/release_case.yaml --out _out --fmt csv
+          python -m dutchbay_v13 --mode irr --config dutchbay_v13/dutchbay_v13/inputs/scenarios/release_case.yaml --out _out --fmt csv
           ls -l _out
 
       - name: Upload artifacts (for debugging)
