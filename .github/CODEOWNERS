@@ -1,2 +1,19 @@
 # Set repo-wide owners (update to real GitHub handles/teams)
-*       @your-org/your-team @your-handle
+*       @arunakulat
+# Freeze core API surface for this cycle
+/dutchbay_v13/finance/irr.py     @arunakulat
+/dutchbay_v13/adapters.py        @arunakulat
+/dutchbay_v13/validate.py        @arunakulat
+/dutchbay_v13/scenario_runner.py @arunakulat
+/dutchbay_v13/cli.py             @arunakulat
+/dutchbay_v13/finance/metrics.py @arunakulat
+/tests/architecture/             @arunakulat
+/tests/api/                      @arunakulat
+/dutchbay_v13/finance/irr.py     @arunakulat
+/dutchbay_v13/adapters.py        @arunakulat
+/dutchbay_v13/validate.py        @arunakulat
+/dutchbay_v13/scenario_runner.py @arunakulat
+/dutchbay_v13/cli.py             @arunakulat
+/dutchbay_v13/finance/metrics.py @arunakulat
+/tests/architecture/             @arunakulat
+/tests/api/                      @arunakulat
