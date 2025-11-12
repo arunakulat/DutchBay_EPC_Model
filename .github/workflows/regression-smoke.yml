@@ -1,17 +1,52 @@
 name: Regression Smoke
 on:
+  workflow_dispatch:
   push:
     branches: [ main ]
-  pull_request:
+
 jobs:
   smoke:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: '3.11' }
-      - run: python -m venv .venv && . .venv/bin/activate && pip install -U pip
-      - run: . .venv/bin/activate && pip install -e ".[dev]" || pip install -r requirements.txt
-      - run: . .venv/bin/activate && chmod +x scripts/regression_smoke.sh && bash scripts/regression_smoke.sh
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      
+      # Belt-and-suspenders guard BEFORE any call to the bootstrap script
+      - name: Ensure .venv is not a file
+        shell: bash
+        run: |
+          if [ -f .venv ] && [ ! -d .venv ]; then
+            echo "Removing tracked .venv file so python3 -m venv can create a directory"
+            rm -f .venv
+          fi
+
+      # If your smoke job calls the bootstrap, keep this; otherwise remove both this and the guard above.
+      - name: Run bootstrap
+        if: ${{ always() }} # keep near the guard
+        shell: bash
+        run: bash scripts/roll_zip_and_bootstrap.sh
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+
+        # Option A: no venv in CI (recommended)
+      - name: Install deps
+        shell: bash
+        run: |
+          python -m pip install -U pip
+          python -m pip install -e .  # or: pyyaml jsonschema numpy-financial pytest
+
+      - name: Validate minimal scenario
+        shell: bash
+        run: |
+          python -m dutchbay_v13.validate full_model_variables_updated.yaml
+
+      - name: Run IRR smoke
+        shell: bash
+        run: |
+          rm -rf _out && mkdir _out
+          python -m dutchbay_v13 --mode irr --config full_model_variables_updated.yaml --out _out --fmt csv
+          ls -l _out
+
+          
